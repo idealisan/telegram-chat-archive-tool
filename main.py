@@ -16,9 +16,14 @@ def main():
         action="store_true",
         help="Scan history from the oldest message and backfill any DB/media gaps.",
     )
+    parser.add_argument(
+        "--env",
+        default=".env",
+        help="Path to the environment config file (default: .env).",
+    )
     args = parser.parse_args()
 
-    cfg = load_config("config.json")
+    cfg = load_config(args.env)
 
     media_dir = cfg["media_dir"]
     min_gb = cfg["min_free_space_gb"]

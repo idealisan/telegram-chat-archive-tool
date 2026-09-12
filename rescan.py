@@ -109,12 +109,23 @@ def rescan(db_path: str, scan_dirs: list[str]):
 
 
 if __name__ == "__main__":
-    cfg = load_config("config.json")
+    argv = sys.argv[1:]
+    env_path = ".env"
+    if "--env" in argv:
+        i = argv.index("--env")
+        try:
+            env_path = argv[i + 1]
+        except IndexError:
+            print("[ERROR] --env requires a path argument.")
+            sys.exit(1)
+        del argv[i:i + 2]
+
+    cfg = load_config(env_path)
     db_path = cfg["db_path"]
 
-    if len(sys.argv) > 1:
+    if argv:
         # Paths passed as arguments
-        scan_dirs = sys.argv[1:]
+        scan_dirs = argv
     else:
         # Scan media_dir + any extra search_paths from config
         scan_dirs = [cfg["media_dir"]] + cfg.get("search_paths", [])

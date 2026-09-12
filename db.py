@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS messages (
     text              TEXT,
     media_type        TEXT,
     media_path        TEXT,
+    media_status      TEXT,
     from_id           INTEGER,
     reply_to_msg_id   INTEGER,
     is_link_resolved  INTEGER DEFAULT 0,
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS resolved_messages (
     text              TEXT,
     media_type        TEXT,
     media_path        TEXT,
+    media_status      TEXT,
     raw_json          TEXT,
     downloaded_at     TEXT NOT NULL,
     UNIQUE(source_message_id, peer, message_id)
@@ -73,6 +75,13 @@ def init_db(db_path: str):
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     with get_conn(db_path) as conn:
         conn.executescript(SCHEMA)
+        # Migrate databases created before media_status existed.
+        for table in ("messages", "resolved_messages"):
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN media_status TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
 
 def resolve_media_path(
@@ -254,14 +263,18 @@ def set_media_path_by_rowid(
     rowid: int,
     media_path: str,
 ):
-    """Update one row's media_path (by rowid) and keep the media_index in sync."""
+    """Update one row's media_path (by rowid) and keep the media_index in sync.
+
+    A relocated file is no longer a failure, so any previous media_status
+    (e.g. 'failed:…') is cleared.
+    """
     assert table in ("messages", "resolved_messages"), table
     with get_conn(db_path) as conn:
         row = conn.execute(
             f"SELECT raw_json FROM {table} WHERE id = ?", (rowid,)
         ).fetchone()
         conn.execute(
-            f"UPDATE {table} SET media_path = ? WHERE id = ?",
+            f"UPDATE {table} SET media_path = ?, media_status = NULL WHERE id = ?",
             (media_path, rowid),
         )
         fingerprint = _extract_media_fingerprint(row["raw_json"]) if row else None
@@ -274,9 +287,9 @@ def save_message(db_path: str, msg_data: dict):
         conn.execute(
             """
             INSERT OR REPLACE INTO messages
-                (message_id, date, text, media_type, media_path, from_id,
+                (message_id, date, text, media_type, media_path, media_status, from_id,
                  reply_to_msg_id, is_link_resolved, resolved_from_url, raw_json, downloaded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 msg_data["message_id"],
@@ -284,6 +297,7 @@ def save_message(db_path: str, msg_data: dict):
                 msg_data.get("text"),
                 msg_data.get("media_type"),
                 msg_data.get("media_path"),
+                msg_data.get("media_status"),
                 msg_data.get("from_id"),
                 msg_data.get("reply_to_msg_id"),
                 int(msg_data.get("is_link_resolved", False)),
@@ -307,9 +321,9 @@ def save_message_and_advance(db_path: str, msg_data: dict, message_id: int):
         conn.execute(
             """
             INSERT OR REPLACE INTO messages
-                (message_id, date, text, media_type, media_path, from_id,
+                (message_id, date, text, media_type, media_path, media_status, from_id,
                  reply_to_msg_id, is_link_resolved, resolved_from_url, raw_json, downloaded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 msg_data["message_id"],
@@ -317,6 +331,7 @@ def save_message_and_advance(db_path: str, msg_data: dict, message_id: int):
                 msg_data.get("text"),
                 msg_data.get("media_type"),
                 msg_data.get("media_path"),
+                msg_data.get("media_status"),
                 msg_data.get("from_id"),
                 msg_data.get("reply_to_msg_id"),
                 int(msg_data.get("is_link_resolved", False)),
@@ -343,8 +358,8 @@ def save_resolved_message(db_path: str, source_message_id: int, peer: str, msg_d
             """
             INSERT OR REPLACE INTO resolved_messages
                 (source_message_id, peer, message_id, date, text, media_type,
-                 media_path, raw_json, downloaded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 media_path, media_status, raw_json, downloaded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source_message_id,
@@ -354,6 +369,7 @@ def save_resolved_message(db_path: str, source_message_id: int, peer: str, msg_d
                 msg_data.get("text"),
                 msg_data.get("media_type"),
                 msg_data.get("media_path"),
+                msg_data.get("media_status"),
                 json.dumps(msg_data.get("raw_json", {}), default=str),
                 now,
             ),
@@ -363,6 +379,92 @@ def save_resolved_message(db_path: str, source_message_id: int, peer: str, msg_d
             msg_data.get("media_fingerprint") or _extract_media_fingerprint(msg_data.get("raw_json")),
             msg_data.get("media_path"),
         )
+
+
+# ---------------------------------------------------------------------------
+# Completeness helpers: everything below exists so no file is ever silently
+# skipped. media_status conventions:
+#   NULL               ok, or no media to download
+#   'failed:<reason>'  attempted but failed → retried by the repair pass
+#   'skipped:size' / 'skipped:type' / 'skipped:disabled' → intentional, never retried
+#   'gone'             source message deleted server-side → never retried
+# ---------------------------------------------------------------------------
+
+def set_message_media(
+    db_path: str,
+    message_id: int,
+    media_path: str | None,
+    media_status: str | None,
+):
+    with get_conn(db_path) as conn:
+        conn.execute(
+            "UPDATE messages SET media_path = ?, media_status = ? WHERE message_id = ?",
+            (media_path, media_status, message_id),
+        )
+
+
+def set_resolved_media(
+    db_path: str,
+    source_message_id: int,
+    peer: str,
+    message_id: int,
+    media_path: str | None,
+    media_status: str | None,
+):
+    with get_conn(db_path) as conn:
+        conn.execute(
+            "UPDATE resolved_messages SET media_path = ?, media_status = ? "
+            "WHERE source_message_id = ? AND peer = ? AND message_id = ?",
+            (media_path, media_status, source_message_id, str(peer), message_id),
+        )
+
+
+def set_link_resolved(db_path: str, message_id: int, resolved: bool):
+    with get_conn(db_path) as conn:
+        conn.execute(
+            "UPDATE messages SET is_link_resolved = ? WHERE message_id = ?",
+            (int(resolved), message_id),
+        )
+
+
+def _needs_media_clause() -> str:
+    # Rows whose media still needs (re-)downloading: explicit failures, plus
+    # legacy rows saved before media_status existed (NULL status, no path,
+    # but a downloadable media type recorded).
+    return (
+        "(media_status LIKE 'failed%' OR (media_status IS NULL "
+        "AND media_path IS NULL AND media_type IS NOT NULL "
+        "AND media_type != 'webpage'))"
+    )
+
+
+def get_pending_media(db_path: str) -> list:
+    """Saved Messages rows whose media still needs downloading."""
+    with get_conn(db_path) as conn:
+        return conn.execute(
+            f"SELECT message_id, media_type FROM messages WHERE {_needs_media_clause()} "
+            "ORDER BY message_id"
+        ).fetchall()
+
+
+def get_pending_resolved_media(db_path: str) -> list:
+    """Linked-message rows whose media still needs downloading."""
+    with get_conn(db_path) as conn:
+        return conn.execute(
+            f"SELECT source_message_id, peer, message_id, media_type "
+            f"FROM resolved_messages WHERE {_needs_media_clause()} "
+            "ORDER BY source_message_id, peer, message_id"
+        ).fetchall()
+
+
+def get_unresolved_links(db_path: str) -> list:
+    """Saved Messages rows flagged unresolved that mention a t.me link."""
+    with get_conn(db_path) as conn:
+        return conn.execute(
+            "SELECT message_id, text FROM messages "
+            "WHERE is_link_resolved = 0 AND text LIKE '%t.me/%' "
+            "ORDER BY message_id"
+        ).fetchall()
 
 
 def get_stats(db_path: str) -> dict:
@@ -377,9 +479,28 @@ def get_stats(db_path: str) -> dict:
         resolved_msgs = conn.execute(
             "SELECT COUNT(*) FROM resolved_messages"
         ).fetchone()[0]
+        failed_media = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE media_status LIKE 'failed%'"
+        ).fetchone()[0]
+        failed_media += conn.execute(
+            "SELECT COUNT(*) FROM resolved_messages WHERE media_status LIKE 'failed%'"
+        ).fetchone()[0]
+        pending_media = conn.execute(
+            f"SELECT COUNT(*) FROM messages WHERE {_needs_media_clause()}"
+        ).fetchone()[0]
+        pending_media += conn.execute(
+            f"SELECT COUNT(*) FROM resolved_messages WHERE {_needs_media_clause()}"
+        ).fetchone()[0]
+        unresolved_links = conn.execute(
+            "SELECT COUNT(*) FROM messages "
+            "WHERE is_link_resolved = 0 AND text LIKE '%t.me/%'"
+        ).fetchone()[0]
     return {
         "total_messages": total,
         "with_media": with_media,
         "link_resolved": resolved,
         "resolved_linked_messages": resolved_msgs,
+        "failed_media": failed_media,
+        "pending_media": pending_media,
+        "unresolved_links": unresolved_links,
     }

@@ -2,3 +2,4 @@ telethon>=1.34.0
 cryptg
 PySocks
 python-socks[asyncio]
+python-dotenv>=1.0.0

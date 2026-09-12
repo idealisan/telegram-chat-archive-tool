@@ -368,8 +368,12 @@ async def _download_media(
     cfg: dict,
     *,
     subfolder: str | None = None,
-) -> str | None:
-    """Download message media and return relative path, or None.
+) -> tuple[str | None, str | None]:
+    """Download message media; return (relative path, media_status).
+
+    media_status is None on success, 'skipped:size' for intentional size
+    skips, or 'failed:<reason>' when the download was attempted but failed
+    (the repair pass retries those — nothing is ever silently dropped).
 
     *subfolder* namespaces files that don't belong to Saved Messages itself
     (e.g. ``resolved/<peer>`` for t.me-linked content) so identical numeric
@@ -377,11 +381,11 @@ async def _download_media(
     """
     media_type = _get_media_type(message)
     if not media_type or media_type == "webpage":
-        return None
+        return None, None
 
     allowed = cfg.get("media_types", [])
     if media_type not in allowed:
-        return None
+        return None, "skipped:type"
 
     # Check file size limit
     max_mb = cfg.get("max_file_size_mb")
@@ -394,7 +398,7 @@ async def _download_media(
             pass
         if size is not None and size > max_mb * 1024 * 1024:
             print(f"    [SKIP] Media too large ({size / 1024 / 1024:.1f} MB > {max_mb} MB)")
-            return None
+            return None, "skipped:size"
 
     date_str = message.date.strftime("%Y/%m") if message.date else "unknown"
     base_dir = Path(media_dir) / (subfolder or media_type)
@@ -439,7 +443,7 @@ async def _download_media(
     # Return cached file only if it exists and has the expected size
     if dest_path.exists():
         if known_size is None or dest_path.stat().st_size == known_size:
-            return str(dest_path.relative_to(media_dir))
+            return str(dest_path.relative_to(media_dir)), None
         else:
             print(f"    [WARN] Cached file size mismatch for msg {message.id}, re-downloading …")
             dest_path.unlink()
@@ -458,13 +462,13 @@ async def _download_media(
             if candidate.is_file():
                 if known_size is None or candidate.stat().st_size == known_size:
                     print(f"    [FOUND] Located in search path: {candidate}")
-                    return _store_path(candidate)
+                    return _store_path(candidate), None
         # Also try exact filename match without name hint
         candidate = Path(search_dir) / (subfolder or media_type) / date_str / filename
         if candidate.is_file():
             if known_size is None or candidate.stat().st_size == known_size:
                 print(f"    [FOUND] Located in search path: {candidate}")
-                return _store_path(candidate)
+                return _store_path(candidate), None
 
     progress = _make_progress_callback(known_size, filename)
 
@@ -487,7 +491,7 @@ async def _download_media(
             sys.stdout.write("\n")
             sys.stdout.flush()
             tmp_path.rename(dest_path)
-            return str(dest_path.relative_to(media_dir))
+            return str(dest_path.relative_to(media_dir)), None
         except KeyboardInterrupt:
             sys.stdout.write("\n")
             if tmp_path.exists():
@@ -514,8 +518,10 @@ async def _download_media(
             sys.stdout.write("\n")
             if tmp_path.exists():
                 tmp_path.unlink()
+            reason = f"failed:{type(exc).__name__}:{exc}"[:200]
             print(f"    [WARN] Failed to download media for msg {message.id}: {exc}")
-            return None
+            print(f"    [WARN] Marked '{reason}' — the repair pass will retry it next run.")
+            return None, reason
 
 
 async def resolve_and_save(
@@ -529,7 +535,7 @@ async def resolve_and_save(
     Returns True only if the linked content was actually fetched and stored
     (so the caller can mark the source message resolved honestly). Returns
     False on rate-limit/network errors or failed media downloads — those stay
-    unresolved so a later --full-scan can backfill them. A linked message
+    unresolved so the repair pass retries them next run. A linked message
     that is definitively gone (deleted / no access) returns True: retrying
     would never succeed.
     """
@@ -559,7 +565,7 @@ async def resolve_and_save(
             data["media_fingerprint"] = _get_media_fingerprint(linked_member)
             data["media_type"] = media_type
 
-            if cfg.get("download_media") and media_type:
+            if cfg.get("download_media") and media_type and media_type != "webpage":
                 existing_path = _get_existing_media_path(
                     db_path,
                     media_dir,
@@ -570,14 +576,23 @@ async def resolve_and_save(
                 )
                 if existing_path:
                     data["media_path"] = existing_path
+                    data["media_status"] = None
                 else:
-                    data["media_path"] = await _download_media(
+                    path, status = await _download_media(
                         client, linked_member, media_dir, cfg, subfolder=subfolder
                     )
-                    if media_type and not data["media_path"]:
+                    data["media_path"] = path
+                    data["media_status"] = status
+                    if media_type and not data["media_path"] and (status or "").startswith("failed"):
                         all_ok = False
             else:
                 data["media_path"] = None
+                if media_type and media_type != "webpage" and not cfg.get("download_media"):
+                    data["media_status"] = "skipped:disabled"
+                elif media_type and media_type not in cfg.get("media_types", []):
+                    data["media_status"] = "skipped:type"
+                else:
+                    data["media_status"] = None
 
             db.save_resolved_message(db_path, source_message_id, str(peer), data)
 
@@ -599,6 +614,157 @@ async def resolve_and_save(
     except Exception as exc:
         print(f"    [WARN] Error resolving {url}: {exc}")
         return False
+
+
+def _coerce_peer(peer: str):
+    """Convert a stored peer back to int when it is a numeric channel ID."""
+    s = str(peer)
+    if s.lstrip("-").isdigit():
+        try:
+            return int(s)
+        except ValueError:
+            pass
+    return s
+
+
+async def repair_incomplete(client, cfg: dict) -> dict:
+    """Retry previously failed media downloads and link resolutions.
+
+    Runs at startup so no file is ever silently skipped: rows marked
+    'failed:*' (or left path-less by an older version) are attempted again.
+    Intentional skips ('skipped:*') and deleted sources ('gone') are left
+    alone. Returns counters for the run summary.
+    """
+    db_path = cfg["db_path"]
+    media_dir = cfg["media_dir"]
+    delay = cfg["request_delay_seconds"]
+    allowed = cfg.get("media_types", [])
+    counts = {"media_repaired": 0, "media_failed": 0, "links_repaired": 0, "links_failed": 0}
+
+    def _single(fetched):
+        if isinstance(fetched, list):
+            return fetched[0] if fetched else None
+        return fetched
+
+    async def _redownload(message, *, subfolder, allow_same_id):
+        existing = _get_existing_media_path(
+            db_path, media_dir, cfg, message,
+            skip_missing=cfg.get("skip_missing_media", False),
+            allow_same_id=allow_same_id,
+        )
+        if existing:
+            return existing, None
+        return await _download_media(client, message, media_dir, cfg, subfolder=subfolder)
+
+    # --- 1. Failed Saved-Messages media ---
+    if cfg.get("download_media"):
+        pending = db.get_pending_media(db_path)
+        if pending:
+            print(f"[REPAIR] Retrying {len(pending)} incomplete media download(s) …")
+        for row in pending:
+            msg_id = row["message_id"]
+            try:
+                fetched = _single(await client.get_messages("me", ids=msg_id))
+                if fetched is None:
+                    db.set_message_media(db_path, msg_id, None, "gone")
+                    print(f"  [REPAIR] msg {msg_id}: source deleted, marked gone.")
+                    continue
+                media_type = _get_media_type(fetched)
+                if not media_type or media_type == "webpage" or media_type not in allowed:
+                    db.set_message_media(db_path, msg_id, None, "skipped:type")
+                    continue
+                path, status = await _redownload(fetched, subfolder=None, allow_same_id=True)
+                db.set_message_media(db_path, msg_id, path, status)
+                if path:
+                    counts["media_repaired"] += 1
+                    print(f"  [REPAIR] msg {msg_id}: recovered → {path}")
+                elif (status or "").startswith("failed"):
+                    counts["media_failed"] += 1
+            except FloodWaitError as e:
+                print(f"  [REPAIR] Flood wait {e.seconds}s, pausing repair …")
+                await asyncio.sleep(e.seconds + 1)
+            except _NETWORK_ERRORS as e:
+                print(f"  [REPAIR] Network error ({e}) — stopping repair, main loop continues; next run retries.")
+                break
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                print(f"  [REPAIR] msg {msg_id}: still failing ({exc})")
+                counts["media_failed"] += 1
+            await asyncio.sleep(delay)
+
+        # --- 2. Failed linked-message media ---
+        pending_res = db.get_pending_resolved_media(db_path)
+        if pending_res:
+            print(f"[REPAIR] Retrying {len(pending_res)} incomplete linked media download(s) …")
+        for row in pending_res:
+            src, peer_raw, mid = row["source_message_id"], row["peer"], row["message_id"]
+            try:
+                fetched = _single(await client.get_messages(_coerce_peer(peer_raw), ids=mid))
+                if fetched is None:
+                    db.set_resolved_media(db_path, src, peer_raw, mid, None, "gone")
+                    continue
+                media_type = _get_media_type(fetched)
+                if not media_type or media_type == "webpage" or media_type not in allowed:
+                    db.set_resolved_media(db_path, src, peer_raw, mid, None, "skipped:type")
+                    continue
+                peer_label = utils.safe_filename(str(peer_raw), max_len=48) or "unknown"
+                path, status = await _redownload(
+                    fetched, subfolder=f"resolved/{peer_label}", allow_same_id=False
+                )
+                db.set_resolved_media(db_path, src, peer_raw, mid, path, status)
+                if path:
+                    counts["media_repaired"] += 1
+                elif (status or "").startswith("failed"):
+                    counts["media_failed"] += 1
+            except FloodWaitError as e:
+                print(f"  [REPAIR] Flood wait {e.seconds}s, pausing repair …")
+                await asyncio.sleep(e.seconds + 1)
+            except _NETWORK_ERRORS as e:
+                print(f"  [REPAIR] Network error ({e}) — stopping repair.")
+                break
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                print(f"  [REPAIR] linked {peer_raw}/{mid}: still failing ({exc})")
+                counts["media_failed"] += 1
+            await asyncio.sleep(delay)
+
+    # --- 3. Previously unresolved t.me links ---
+    if cfg.get("resolve_tme_links"):
+        pending_links = db.get_unresolved_links(db_path)
+        if pending_links:
+            print(f"[REPAIR] Re-resolving {len(pending_links)} unresolved link message(s) …")
+        for row in pending_links:
+            try:
+                links = utils.extract_tme_links(row["text"] or "")
+                if not links:
+                    # Mentions t.me but nothing resolvable (e.g. invite link).
+                    db.set_link_resolved(db_path, row["message_id"], True)
+                    continue
+                ok = True
+                for info in links:
+                    ok = await resolve_and_save(client, row["message_id"], info, cfg) and ok
+                    await asyncio.sleep(delay)
+                db.set_link_resolved(db_path, row["message_id"], ok)
+                if ok:
+                    counts["links_repaired"] += 1
+                else:
+                    counts["links_failed"] += 1
+            except FloodWaitError as e:
+                print(f"  [REPAIR] Flood wait {e.seconds}s, pausing repair …")
+                await asyncio.sleep(e.seconds + 1)
+            except _NETWORK_ERRORS as e:
+                print(f"  [REPAIR] Network error ({e}) — stopping repair.")
+                break
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                print(f"  [REPAIR] links in msg {row['message_id']}: still failing ({exc})")
+                counts["links_failed"] += 1
+            await asyncio.sleep(delay)
+
+    return counts
 
 
 async def run_download(cfg: dict, *, full_scan: bool = False):
@@ -635,6 +801,21 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
             print("  [OK] Missing files will be re-downloaded.")
     elif missing_count and skip_missing:
         print(f"[INFO] {missing_count} media file(s) missing from disk — skipping (skip_missing_media=true).")
+
+    # --- Repair pass: retry anything a previous run failed to fetch ---
+    repair_counts = {"media_repaired": 0, "media_failed": 0, "links_repaired": 0, "links_failed": 0}
+    try:
+        repair_counts = await repair_incomplete(client, cfg)
+    except AuthKeyDuplicatedError:
+        print()
+        client = await _reauthorize_client(client, cfg, startup=False)
+        print("[INFO] Connected to Telegram.")
+        repair_counts = await repair_incomplete(client, cfg)
+    if repair_counts["media_repaired"] or repair_counts["links_repaired"]:
+        print(
+            f"[REPAIR] Recovered {repair_counts['media_repaired']} media file(s), "
+            f"{repair_counts['links_repaired']} link(s)."
+        )
 
     total = 0
     reconnect_attempt = 0
@@ -705,7 +886,10 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
                     data["resolved_from_url"] = None
 
                     # --- Download media ---
-                    if cfg.get("download_media") and media_type:
+                    # Every outcome is recorded in media_status so the repair
+                    # pass can retry real failures. Intentional skips get an
+                    # explicit 'skipped:*' status and are never retried.
+                    if cfg.get("download_media") and media_type and media_type != "webpage":
                         existing_path = _get_existing_media_path(
                             db_path,
                             media_dir,
@@ -715,10 +899,19 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
                         )
                         if existing_path:
                             data["media_path"] = existing_path
+                            data["media_status"] = None
                         else:
-                            data["media_path"] = await _download_media(client, message, media_dir, cfg)
+                            path, status = await _download_media(client, message, media_dir, cfg)
+                            data["media_path"] = path
+                            data["media_status"] = status
                     else:
                         data["media_path"] = None
+                        if media_type and media_type != "webpage" and not cfg.get("download_media"):
+                            data["media_status"] = "skipped:disabled"
+                        elif media_type and media_type not in cfg.get("media_types", []):
+                            data["media_status"] = "skipped:type"
+                        else:
+                            data["media_status"] = None
 
                     # --- Resolve t.me links ---
                     text = data.get("text") or ""
@@ -731,7 +924,7 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
                             links_ok = links_ok and ok
                             await asyncio.sleep(delay)
                         # Only mark resolved when every link actually succeeded;
-                        # failures stay 0 so a later --full-scan can backfill them.
+                        # failures stay 0 so the repair pass retries them next run.
                         data["is_link_resolved"] = links_ok
 
                     if full_scan:
@@ -800,6 +993,10 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
             f"  With media       : {stats['with_media']}\n"
             f"  Links resolved   : {stats['link_resolved']}\n"
             f"  Linked messages  : {stats['resolved_linked_messages']}\n"
-            f"  This run saved   : {total}"
+            f"  This run saved   : {total}\n"
+            f"  Repaired media   : {repair_counts['media_repaired']}\n"
+            f"  Repaired links   : {repair_counts['links_repaired']}\n"
+            f"  Still failing    : {stats['pending_media']} media, "
+            f"{stats['unresolved_links']} links"
         )
         await client.disconnect()

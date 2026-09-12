@@ -1,6 +1,6 @@
 """Utility helpers for tg-down."""
 
-import json
+import os
 import re
 import shutil
 import sys
@@ -15,36 +15,95 @@ TME_PATTERNS = [
 ]
 
 
-def load_config(path: str = "config.json") -> dict:
-    config_path = Path(path)
-    if not config_path.exists():
-        print(f"[ERROR] Config file not found: {path}")
-        sys.exit(1)
-    with open(config_path) as f:
-        cfg = json.load(f)
+def _parse_bool(value: str | None, default: bool) -> bool:
+    if value is None or str(value).strip() == "":
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
 
-    required = ["api_id", "api_hash"]
-    for key in required:
-        if not cfg.get(key):
-            print(f"[ERROR] '{key}' is missing or empty in {path}")
+
+def _parse_list(value: str | None, default: list[str]) -> list[str]:
+    if value is None or str(value).strip() == "":
+        return default
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def load_config(path: str = ".env") -> dict:
+    """Load configuration from a .env file (plus real environment variables).
+
+    Real environment variables take precedence over the file, so containers
+    can inject secrets without writing them to disk. See .env.example.
+    """
+    env_path = Path(path)
+    if env_path.exists():
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path=env_path, override=False)
+    elif not any(os.environ.get(k) for k in ("API_ID", "API_HASH")):
+        print(f"[ERROR] Config file not found: {path}")
+        print("  Copy '.env.example' to '.env' and fill in your credentials,")
+        print("  or export API_ID / API_HASH as environment variables.")
+        sys.exit(1)
+
+    api_id = os.environ.get("API_ID", "").strip()
+    api_hash = os.environ.get("API_HASH", "").strip()
+    if not api_id or not api_hash:
+        print(f"[ERROR] 'API_ID' / 'API_HASH' are missing or empty ({path})")
+        sys.exit(1)
+
+    try:
+        api_id_int = int(api_id)
+    except ValueError:
+        print(f"[ERROR] 'API_ID' must be a number, got: {api_id!r}")
+        sys.exit(1)
+
+    max_size_raw = os.environ.get("MAX_FILE_SIZE_MB", "").strip()
+    max_size = None
+    if max_size_raw:
+        try:
+            max_size = float(max_size_raw)
+        except ValueError:
+            print(f"[ERROR] 'MAX_FILE_SIZE_MB' must be a number, got: {max_size_raw!r}")
             sys.exit(1)
 
-    # Normalise types
-    cfg["api_id"] = int(cfg["api_id"])
-    cfg.setdefault("session_name", "tg_session")
-    cfg.setdefault("media_dir", "./media")
-    cfg.setdefault("db_path", "./messages.db")
-    cfg.setdefault("min_free_space_gb", 10)
-    cfg.setdefault("batch_size", 100)
-    cfg.setdefault("download_media", True)
-    cfg.setdefault("media_types", ["photo", "video", "video_note", "document", "audio", "voice", "sticker", "animation"])
-    cfg.setdefault("max_file_size_mb", None)
-    cfg.setdefault("resolve_tme_links", True)
-    cfg.setdefault("request_delay_seconds", 0.5)
-    cfg.setdefault("proxy", None)
-    cfg.setdefault("search_paths", [])  # extra directories to check before re-downloading
-    cfg.setdefault("skip_missing_media", False)  # if True, don't re-download files missing from disk
-    cfg.setdefault("group_scan_window", 12)  # scan +/- N message IDs around a linked album item
+    def _float(key: str, default: float) -> float:
+        raw = os.environ.get(key, "").strip()
+        if not raw:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            print(f"[ERROR] '{key}' must be a number, got: {raw!r}")
+            sys.exit(1)
+
+    def _int(key: str, default: int) -> int:
+        raw = os.environ.get(key, "").strip()
+        if not raw:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            print(f"[ERROR] '{key}' must be an integer, got: {raw!r}")
+            sys.exit(1)
+
+    cfg = {
+        "api_id": api_id_int,
+        "api_hash": api_hash,
+        "session_name": os.environ.get("SESSION_NAME", "").strip() or "tg_session",
+        "media_dir": os.environ.get("MEDIA_DIR", "").strip() or "./media",
+        "db_path": os.environ.get("DB_PATH", "").strip() or "./messages.db",
+        "min_free_space_gb": _float("MIN_FREE_SPACE_GB", 10),
+        "download_media": _parse_bool(os.environ.get("DOWNLOAD_MEDIA"), True),
+        "media_types": _parse_list(
+            os.environ.get("MEDIA_TYPES"),
+            ["photo", "video", "video_note", "document", "audio", "voice", "sticker", "animation"],
+        ),
+        "max_file_size_mb": max_size,
+        "resolve_tme_links": _parse_bool(os.environ.get("RESOLVE_TME_LINKS"), True),
+        "request_delay_seconds": _float("REQUEST_DELAY_SECONDS", 0.5),
+        "proxy": os.environ.get("PROXY", "").strip() or None,
+        "search_paths": _parse_list(os.environ.get("SEARCH_PATHS"), []),
+        "skip_missing_media": _parse_bool(os.environ.get("SKIP_MISSING_MEDIA"), False),
+        "group_scan_window": _int("GROUP_SCAN_WINDOW", 12),
+    }
 
     return cfg
 
