@@ -118,10 +118,10 @@ Real environment variables override values in the `.env` file, so secrets can al
 
 ```
 media/
-  photo/2024/05/123456789.jpg                          # Saved Messages (legacy flat layout)
-  video/2024/05/987654321.mp4
-  resolved/<peer>/photo/2024/05/222222222.jpg          # t.me-linked media (Saved Messages)
-  dialogs/<name>_<key>/photo/2024/05/333333333.jpg     # other dialogs, namespaced per chat
+  photo/2024-05/123456789.jpg                          # Saved Messages (legacy flat layout)
+  video/2024-05/987654321.mp4
+  resolved/<peer>/photo/2024-05/222222222.jpg          # t.me-linked media (Saved Messages)
+  dialogs/<name>_<key>/photo/2024-05/333333333.jpg     # other dialogs, namespaced per chat
   dialogs/<name>_<key>/resolved/<peer>/...             # their linked media
   ...
 ```

@@ -470,7 +470,7 @@ async def _download_media(
             print(f"    [SKIP] Media too large ({size / 1024 / 1024:.1f} MB > {max_mb} MB)")
             return None, "skipped:size"
 
-    date_str = message.date.strftime("%Y/%m") if message.date else "unknown"
+    date_str = message.date.strftime("%Y-%m") if message.date else "unknown"
     base_dir = Path(media_dir)
     if namespace:
         base_dir = base_dir / namespace
