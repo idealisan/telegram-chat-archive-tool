@@ -8,11 +8,29 @@ Up/Down + Enter, then downloads that dialog's full history and media.
 import asyncio
 import argparse
 
-from telethon.errors import AuthKeyDuplicatedError
+from telethon.errors import AuthKeyDuplicatedError, FloodWaitError
 
 from utils import load_config, check_disk_space, free_space_gb, wait_for_disk_space
 from downloader import _build_client, _reauthorize_client, make_target, run_download
 from picker import entity_name, pick_dialog
+
+
+async def _load_dialogs(client, attempts: int = 4):
+    """Fetch all dialogs, waiting through FloodWait rate limits.
+
+    get_dialogs() pages through everything (including archived folders),
+    but large accounts can hit FloodWait mid-fetch — retry instead of dying.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return await client.get_dialogs()
+        except FloodWaitError as e:
+            print(f"[PICK] Rate limited while listing dialogs, "
+                  f"waiting {e.seconds}s … (attempt {attempt}/{attempts})")
+            await asyncio.sleep(e.seconds + 1)
+    print("[ERROR] Could not list dialogs after rate-limit retries. "
+          "Try again later, or use --peer to open one chat directly.")
+    return []
 
 
 async def _select_target(client, peer_arg):
@@ -22,8 +40,12 @@ async def _select_target(client, peer_arg):
             return make_target("me")
         entity = await client.get_entity(peer_arg)
         return make_target(entity, name=entity_name(entity))
-    dialogs = await client.get_dialogs()
-    chosen = await pick_dialog(dialogs)
+    dialogs = await _load_dialogs(client)
+
+    async def _resolve_direct(query):
+        return await client.get_entity(query)
+
+    chosen = await pick_dialog(dialogs, resolve=_resolve_direct)
     if chosen is None:
         return None
     return make_target(chosen.entity, name=chosen.name)

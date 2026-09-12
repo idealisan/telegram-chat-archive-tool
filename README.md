@@ -44,8 +44,17 @@ API_HASH=your_api_hash_here
 
 Without `--peer`, startup shows the dialog picker: type to filter by name,
 username or ID, move with `↑`/`↓`, confirm with `Enter`, cancel with `Esc`.
-With `--peer` (username, phone, numeric ID, or `me`) the picker is skipped —
-useful for scripts and cron jobs.
+Tips:
+
+- The `@` is optional (`alice` and `@alice` both match); pasting a
+  `https://t.me/…` link works too.
+- Archived chats are included in the list.
+- If the chat is not in your dialog list at all (e.g. a public channel you
+  never joined), typing its `@username`, numeric ID, or `t.me/c/…` link
+  offers a `⟶ 直接打开` row that opens it directly via the API.
+  (`t.me/+…` invite links can't be opened this way — join first.)
+  With `--peer` (username, phone, numeric ID, or `me`) the picker is skipped —
+  useful for scripts and cron jobs.
 
 To re-scan the selected dialog's entire history and backfill anything missing:
 
