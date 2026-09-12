@@ -28,6 +28,20 @@ def _parse_list(value: str | None, default: list[str]) -> list[str]:
     return [item.strip() for item in str(value).split(",") if item.strip()]
 
 
+DEBUG_DIALOGS_DEFAULT_PATH = "./dialogs_debug.txt"
+
+
+def _parse_debug_dialogs_file(value: str | None) -> str | None:
+    """Parse DEBUG_DIALOGS_FILE: empty/false = off, true-like = default path,
+    anything else = custom dump path."""
+    raw = (value or "").strip()
+    if not raw or raw.lower() in ("0", "false", "no", "off"):
+        return None
+    if raw.lower() in ("1", "true", "yes", "y", "on"):
+        return DEBUG_DIALOGS_DEFAULT_PATH
+    return raw
+
+
 def load_config(path: str = ".env") -> dict:
     """Load configuration from a .env file (plus real environment variables).
 
@@ -104,6 +118,7 @@ def load_config(path: str = ".env") -> dict:
         "search_paths": _parse_list(os.environ.get("SEARCH_PATHS"), []),
         "skip_missing_media": _parse_bool(os.environ.get("SKIP_MISSING_MEDIA"), False),
         "group_scan_window": _int("GROUP_SCAN_WINDOW", 12),
+        "debug_dialogs_file": _parse_debug_dialogs_file(os.environ.get("DEBUG_DIALOGS_FILE")),
     }
 
     return cfg

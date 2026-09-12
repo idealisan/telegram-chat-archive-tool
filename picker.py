@@ -118,6 +118,20 @@ def entity_name(entity) -> str:
     return f"id {getattr(entity, 'id', '?')}"
 
 
+def format_dialog_line(index: int, dialog, peer_key: str = "", source: str = "") -> str:
+    """Numbered one-line dump of a dialog (for --debug-dialogs output)."""
+    unread = getattr(dialog, "unread_count", 0) or 0
+    extra = []
+    if peer_key:
+        extra.append(f"key={peer_key}")
+    if source:
+        extra.append(f"src={source}")
+    if unread:
+        extra.append(f"unread={unread}")
+    suffix = f" [{', '.join(extra)}]" if extra else ""
+    return f"{index}. {dialog_title(dialog)}{suffix}"
+
+
 async def pick_dialog(dialogs, resolve=None):
     """Show the picker; return the chosen Dialog (or entity namespace), or None.
 

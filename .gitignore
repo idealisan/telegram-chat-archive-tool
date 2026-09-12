@@ -8,6 +8,8 @@ venv/
 # tg-down runtime artefacts — never commit secrets or downloads
 .env
 /env
+dialogs_debug.txt
+*.debug.txt
 *.session
 *.session-journal
 *.session-wal

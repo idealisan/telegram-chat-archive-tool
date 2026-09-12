@@ -49,6 +49,8 @@ Tips:
 - The `@` is optional (`alice` and `@alice` both match); pasting a
   `https://t.me/…` link works too.
 - Archived chats are included in the list.
+- The list is fetched from main + archived + every custom folder and merged,
+  so quiet old chats can't slip through pagination gaps.
 - If the chat is not in your dialog list at all (e.g. a public channel you
   never joined), typing its `@username`, numeric ID, or `t.me/c/…` link
   offers a `⟶ 直接打开` row that opens it directly via the API.
@@ -61,6 +63,17 @@ To re-scan the selected dialog's entire history and backfill anything missing:
 ```bash
 .venv/bin/python main.py --peer @someone --full-scan
 ```
+
+To diagnose a missing dialog, dump everything loaded at startup (numbered,
+one per line — includes peer key and which list each dialog came from):
+
+```bash
+.venv/bin/python main.py --debug-dialogs
+# or: .venv/bin/python main.py --debug-dialogs /tmp/dialogs.txt
+```
+
+The same can be enabled permanently via `DEBUG_DIALOGS_FILE` in `.env`
+(`true` = `./dialogs_debug.txt`, or a custom path; empty = off).
 
 To re-index files you moved on disk (scoped to one dialog, `me` by default):
 
