@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 
@@ -121,6 +122,27 @@ def free_space_gb(path: str) -> float:
     target = Path(path)
     target.mkdir(parents=True, exist_ok=True)
     return shutil.disk_usage(target).free / (1024 ** 3)
+
+
+def wait_for_disk_space(path: str, min_gb: float, poll_seconds: int = 60) -> None:
+    """Block until free space on *path*'s volume is >= min_gb.
+
+    Polls every *poll_seconds* instead of aborting, so tg-down resumes
+    automatically once space is freed — no manual rerun needed.
+    Ctrl+C aborts the wait.
+    """
+    while True:
+        free = free_space_gb(path)
+        if free >= min_gb:
+            return
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(
+            f"[DISK] {stamp} Low disk space: {free:.2f} GB free, "
+            f"need {min_gb} GB. Rechecking in {poll_seconds}s … "
+            f"(free up space to resume automatically, Ctrl+C to abort)",
+            flush=True,
+        )
+        time.sleep(poll_seconds)
 
 
 def extract_tme_links(text: str) -> list[dict]:

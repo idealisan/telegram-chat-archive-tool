@@ -13,7 +13,6 @@ from telethon.tl.types import (
     Message,
     MessageMediaDocument,
     MessageMediaPhoto,
-    MessageMediaWebPage,
     MessageService,
 )
 
@@ -41,6 +40,10 @@ _CHUNK_SIZE = 512 * 1024     # bytes per chunk (must be a multiple of 4 096)
 
 # Progress display settings
 _PROGRESS_UPDATE_INTERVAL = 0.75  # seconds between terminal refreshes
+
+# Disk-space polling: when the disk fills up, wait this long between
+# rechecks instead of aborting — resumes automatically once space is freed.
+_DISK_POLL_SECONDS = 60
 
 
 def _fmt_size(n: int) -> str:
@@ -103,6 +106,31 @@ def _make_progress_callback(total: int | None, filename: str):
         sys.stdout.flush()
 
     return callback
+
+
+async def _wait_for_disk_space(
+    media_dir: str,
+    min_gb: float,
+    poll_seconds: int = _DISK_POLL_SECONDS,
+) -> None:
+    """Wait until free space is back above *min_gb*, polling periodically.
+
+    Called whenever the disk fills up mid-run (main loop and repair pass):
+    downloads pause here and resume automatically once space is freed,
+    instead of aborting and requiring a manual rerun.
+    """
+    while True:
+        free = utils.free_space_gb(media_dir)
+        if free >= min_gb:
+            return
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(
+            f"[DISK] {stamp} Low disk space: {free:.2f} GB free, "
+            f"need {min_gb} GB. Downloads paused — rechecking in "
+            f"{poll_seconds}s … (Ctrl+C to abort)",
+            flush=True,
+        )
+        await asyncio.sleep(poll_seconds)
 
 
 def _cleanup_tmp_files(media_dir: str):
@@ -638,6 +666,7 @@ async def repair_incomplete(client, cfg: dict) -> dict:
     db_path = cfg["db_path"]
     media_dir = cfg["media_dir"]
     delay = cfg["request_delay_seconds"]
+    min_gb = cfg["min_free_space_gb"]
     allowed = cfg.get("media_types", [])
     counts = {"media_repaired": 0, "media_failed": 0, "links_repaired": 0, "links_failed": 0}
 
@@ -669,6 +698,7 @@ async def repair_incomplete(client, cfg: dict) -> dict:
                     db.set_message_media(db_path, msg_id, None, "gone")
                     print(f"  [REPAIR] msg {msg_id}: source deleted, marked gone.")
                     continue
+                await _wait_for_disk_space(media_dir, min_gb)
                 media_type = _get_media_type(fetched)
                 if not media_type or media_type == "webpage" or media_type not in allowed:
                     db.set_message_media(db_path, msg_id, None, "skipped:type")
@@ -704,6 +734,7 @@ async def repair_incomplete(client, cfg: dict) -> dict:
                 if fetched is None:
                     db.set_resolved_media(db_path, src, peer_raw, mid, None, "gone")
                     continue
+                await _wait_for_disk_space(media_dir, min_gb)
                 media_type = _get_media_type(fetched)
                 if not media_type or media_type == "webpage" or media_type not in allowed:
                     db.set_resolved_media(db_path, src, peer_raw, mid, None, "skipped:type")
@@ -802,21 +833,7 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
     elif missing_count and skip_missing:
         print(f"[INFO] {missing_count} media file(s) missing from disk — skipping (skip_missing_media=true).")
 
-    # --- Repair pass: retry anything a previous run failed to fetch ---
     repair_counts = {"media_repaired": 0, "media_failed": 0, "links_repaired": 0, "links_failed": 0}
-    try:
-        repair_counts = await repair_incomplete(client, cfg)
-    except AuthKeyDuplicatedError:
-        print()
-        client = await _reauthorize_client(client, cfg, startup=False)
-        print("[INFO] Connected to Telegram.")
-        repair_counts = await repair_incomplete(client, cfg)
-    if repair_counts["media_repaired"] or repair_counts["links_repaired"]:
-        print(
-            f"[REPAIR] Recovered {repair_counts['media_repaired']} media file(s), "
-            f"{repair_counts['links_repaired']} link(s)."
-        )
-
     total = 0
     reconnect_attempt = 0
     persisted_resume_id = int(db.get_state(db_path, "last_saved_message_id", 0) or 0)
@@ -824,6 +841,21 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
     highest_seen_id = persisted_resume_id
     full_scan_completed = False
     try:
+        # --- Repair pass: retry anything a previous run failed to fetch ---
+        # (inside the outer try so Ctrl+C here still prints the summary and disconnects)
+        try:
+            repair_counts = await repair_incomplete(client, cfg)
+        except AuthKeyDuplicatedError:
+            print()
+            client = await _reauthorize_client(client, cfg, startup=False)
+            print("[INFO] Connected to Telegram.")
+            repair_counts = await repair_incomplete(client, cfg)
+        if repair_counts["media_repaired"] or repair_counts["links_repaired"]:
+            print(
+                f"[REPAIR] Recovered {repair_counts['media_repaired']} media file(s), "
+                f"{repair_counts['links_repaired']} link(s)."
+            )
+
         while True:
             try:
                 # Reconnect if client dropped
@@ -851,15 +883,19 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
                     min_id=min_id,
                     limit=None,
                 ):
-                    # --- Disk space check every 50 messages ---
+                    # --- Disk space gate every 50 messages ---
+                    # Low disk pauses (polling every minute) instead of
+                    # stopping: downloads resume automatically once space
+                    # is freed, with no manual rerun needed.
                     if total % 50 == 0:
                         free = utils.free_space_gb(media_dir)
                         if free < min_gb:
                             print(
-                                f"\n[STOP] Disk space too low: {free:.2f} GB free "
-                                f"(minimum {min_gb} GB required). Stopping."
+                                f"\n[DISK] Disk space too low: {free:.2f} GB free "
+                                f"(minimum {min_gb} GB required). Pausing …"
                             )
-                            return
+                            await _wait_for_disk_space(media_dir, min_gb)
+                            print("[DISK] Space freed, resuming …")
                         if total % 500 == 0 and total > 0:
                             print(f"[INFO] {total} messages processed, {free:.1f} GB free …")
 

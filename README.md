@@ -12,7 +12,7 @@ Download your Telegram **Saved Messages** (`me`) to a local SQLite database and 
 - Starts from the **oldest** message; fully resumable if interrupted
 - Repair pass on every run: previously failed media downloads and link resolutions are retried automatically — no file is ever silently skipped (`media_status` tracks `failed:*` / `skipped:*` / `gone` per row)
 - Optional full-history scan mode to backfill missed messages without clearing old data
-- Checks for at least 10 GB (configurable) of free disk space before and during download
+- Guards free disk space (configurable minimum) before and during download: when space runs low it pauses and rechecks every minute, resuming automatically once space is freed
 
 ## Setup
 
@@ -72,9 +72,10 @@ Real environment variables override values in the `.env` file, so secrets can al
 
 ## Database schema
 
-**`messages`** — one row per Saved Message  
+**`messages`** — one row per Saved Message (`media_status`: NULL = ok, `failed:*` = retried next run, `skipped:*` = intentionally skipped, `gone` = deleted upstream)  
 **`resolved_messages`** — content fetched by following `t.me` links  
-**`download_state`** — stores resume cursor (`last_saved_message_id`)
+**`download_state`** — stores resume cursor (`last_saved_message_id`)  
+**`media_index`** — media fingerprint → path dedup index
 
 ## Media directory layout
 

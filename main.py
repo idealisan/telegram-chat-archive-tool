@@ -3,9 +3,8 @@
 
 import asyncio
 import argparse
-import sys
 
-from utils import load_config, check_disk_space, free_space_gb
+from utils import load_config, check_disk_space, free_space_gb, wait_for_disk_space
 from downloader import run_download
 
 
@@ -32,12 +31,11 @@ def main():
     if not check_disk_space(media_dir, min_gb):
         free = free_space_gb(media_dir)
         print(
-            f"[ERROR] Not enough free disk space.\n"
-            f"  Required : {min_gb} GB\n"
-            f"  Available: {free:.2f} GB\n"
-            f"  Path     : {media_dir}"
+            f"[WARN] Not enough free disk space "
+            f"(need {min_gb} GB, have {free:.2f} GB). "
+            f"Waiting for cleanup — download starts automatically."
         )
-        sys.exit(1)
+        wait_for_disk_space(media_dir, min_gb)
     print(f"[OK]    {free_space_gb(media_dir):.1f} GB free on '{media_dir}'.")
 
     try:

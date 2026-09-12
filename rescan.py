@@ -5,8 +5,8 @@ Run this after moving files to a new location so tg-down
 knows where they are and won't re-download them.
 
 Usage:
-    python3 rescan.py                  # scan all paths in config
-    python3 rescan.py /path/to/media   # scan a specific directory
+    python3 rescan.py [--env .env]                  # scan all paths in .env
+    python3 rescan.py /path/to/media                # scan a specific directory
 """
 
 import sys
