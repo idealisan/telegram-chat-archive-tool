@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tg-down — Documentation</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ── Light mode (default) ── */
+    :root {
+      --bg: #ffffff;
+      --surface: #f5f6f8;
+      --surface2: #ebedf2;
+      --border: #d8dce8;
+      --accent: #2563eb;
+      --accent2: #7c3aed;
+      --green: #059669;
+      --yellow: #d97706;
+      --red: #dc2626;
+      --text: #1e2030;
+      --muted: #6b7280;
+      --code-bg: #f0f2f8;
+      --radius: 10px;
+      --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+
+      /* syntax colours (light) */
+      --syn-comment: #9ca3af;
+      --syn-kw:      #7c3aed;
+      --syn-fn:      #2563eb;
+      --syn-str:     #059669;
+      --syn-num:     #d97706;
+      --syn-arch-box: #2563eb;
+      --syn-arch-arr: #9ca3af;
+      --syn-arch-lbl: #059669;
+    }
+
+    /* ── Dark mode ── */
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1117;
+        --surface: #1a1d27;
+        --surface2: #22263a;
+        --border: #2e3250;
+        --accent: #5b8af5;
+        --accent2: #7c5bf5;
+        --green: #3ecf8e;
+        --yellow: #f5c842;
+        --red: #f55b5b;
+        --text: #d4d8f0;
+        --muted: #7880a0;
+        --code-bg: #141720;
+
+        --syn-comment: #4a5270;
+        --syn-kw:      #a78bfa;
+        --syn-fn:      #7ab4ff;
+        --syn-str:     #3ecf8e;
+        --syn-num:     #f5c842;
+        --syn-arch-box: #7ab4ff;
+        --syn-arch-arr: #4a5270;
+        --syn-arch-lbl: #3ecf8e;
+      }
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 15px;
+      line-height: 1.7;
+    }
+
+    /* ── Layout ── */
+    .layout { display: flex; min-height: 100vh; }
+
+    nav {
+      width: 260px;
+      flex-shrink: 0;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 32px 0;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+    }
+
+    nav .logo {
+      padding: 0 24px 24px;
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+    }
+
+    nav .logo .icon { font-size: 1.4rem; }
+
+    nav a {
+      display: block;
+      padding: 7px 24px;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.88rem;
+      border-left: 3px solid transparent;
+      transition: color .15s, border-color .15s, background .15s;
+    }
+
+    nav a:hover { color: var(--text); background: var(--surface2); }
+    nav a.active { color: var(--accent); border-left-color: var(--accent); background: var(--surface2); }
+
+    nav .nav-section {
+      padding: 16px 24px 4px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    main {
+      flex: 1;
+      max-width: 860px;
+      padding: 56px 48px 100px;
+    }
+
+    /* ── Typography ── */
+    h1 { font-size: 2.2rem; font-weight: 800; color: var(--text); margin-bottom: 12px; }
+    h2 { font-size: 1.35rem; font-weight: 700; color: var(--text); margin: 56px 0 16px; padding-top: 8px; border-top: 1px solid var(--border); }
+    h3 { font-size: 1.05rem; font-weight: 600; color: var(--accent); margin: 28px 0 10px; }
+    p  { margin-bottom: 14px; color: var(--text); }
+    ul, ol { margin: 0 0 14px 20px; }
+    li { margin-bottom: 6px; }
+    a  { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .subtitle {
+      font-size: 1.05rem;
+      color: var(--muted);
+      margin-bottom: 32px;
+    }
+
+    /* ── Badge row ── */
+    .badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 32px; }
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+    .badge-blue   { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+    .badge-green  { background: color-mix(in srgb, var(--green)  15%, transparent); color: var(--green); }
+    .badge-purple { background: color-mix(in srgb, var(--accent2) 15%, transparent); color: var(--accent2); }
+    .badge-yellow { background: color-mix(in srgb, var(--yellow) 15%, transparent); color: var(--yellow); }
+
+    /* ── Code blocks ── */
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      overflow-x: auto;
+      margin: 16px 0 24px;
+      font-family: var(--font-mono);
+      font-size: 0.83rem;
+      line-height: 1.6;
+    }
+
+    code {
+      font-family: var(--font-mono);
+      font-size: 0.85em;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 6px;
+    }
+
+    pre code { background: none; border: none; padding: 0; font-size: inherit; }
+
+    .comment { color: var(--syn-comment); }
+    .kw      { color: var(--syn-kw); }
+    .fn      { color: var(--syn-fn); }
+    .str     { color: var(--syn-str); }
+    .num     { color: var(--syn-num); }
+
+    /* ── Tables ── */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0 28px;
+      font-size: 0.88rem;
+    }
+
+    th {
+      text-align: left;
+      padding: 10px 14px;
+      background: var(--surface2);
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      border-bottom: 1px solid var(--border);
+    }
+
+    td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: var(--surface2); }
+
+    td code { font-size: 0.82rem; }
+
+    /* ── Callout boxes ── */
+    .callout {
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      margin: 20px 0;
+      border-left: 4px solid;
+      font-size: 0.9rem;
+    }
+
+    .callout-info    { background: color-mix(in srgb, var(--accent) 10%, var(--bg)); border-color: var(--accent); }
+    .callout-warn    { background: color-mix(in srgb, var(--yellow) 10%, var(--bg)); border-color: var(--yellow); }
+    .callout-danger  { background: color-mix(in srgb, var(--red)    10%, var(--bg)); border-color: var(--red); }
+    .callout-success { background: color-mix(in srgb, var(--green)  10%, var(--bg)); border-color: var(--green); }
+
+    .callout strong { display: block; margin-bottom: 4px; }
+    .callout-info strong    { color: var(--accent); }
+    .callout-warn strong    { color: var(--yellow); }
+    .callout-danger strong  { color: var(--red); }
+    .callout-success strong { color: var(--green); }
+
+    /* ── Architecture diagram ── */
+    .arch {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px 32px;
+      margin: 20px 0 28px;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.9;
+      overflow-x: auto;
+    }
+
+    .arch .box  { color: var(--syn-arch-box); }
+    .arch .arr  { color: var(--syn-arch-arr); }
+    .arch .lbl  { color: var(--syn-arch-lbl); }
+    .arch .note { color: var(--muted); font-style: italic; }
+
+    /* ── File tree ── */
+    .filetree {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      font-family: var(--font-mono);
+      font-size: 0.83rem;
+      line-height: 1.8;
+      margin: 16px 0 24px;
+    }
+
+    .filetree .dir  { color: var(--syn-arch-box); font-weight: 600; }
+    .filetree .file { color: var(--text); }
+    .filetree .desc { color: var(--muted); font-size: 0.78rem; }
+
+    /* ── Steps ── */
+    .steps { counter-reset: step; list-style: none; margin: 0 0 24px; padding: 0; }
+    .steps li {
+      counter-increment: step;
+      display: flex;
+      gap: 16px;
+      margin-bottom: 20px;
+      align-items: flex-start;
+    }
+
+    .steps li::before {
+      content: counter(step);
+      flex-shrink: 0;
+      width: 28px;
+      height: 28px;
+      background: var(--accent);
+      color: white;
+      border-radius: 50%;
+      font-weight: 700;
+      font-size: 0.82rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 2px;
+    }
+
+    .steps li .content { flex: 1; }
+    .steps li .content strong { color: var(--text); display: block; margin-bottom: 4px; }
+
+    /* ── Section anchors ── */
+    h2::before { content: ""; display: block; margin-top: -80px; padding-top: 80px; }
+
+    /* ── Log output example ── */
+    .log { color: var(--muted); }
+    .log .ok   { color: var(--green); }
+    .log .info { color: var(--accent); }
+    .log .warn { color: var(--yellow); }
+    .log .link { color: var(--accent2); }
+    .log .msg  { color: var(--text); }
+  </style>
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- ── Sidebar nav ── -->
+  <nav>
+    <div class="logo">
+      <span class="icon">📥</span>
+      tg-down
+    </div>
+
+    <div class="nav-section">Getting Started</div>
+    <a href="#overview">Overview</a>
+    <a href="#quickstart">Quick Start</a>
+    <a href="#config">Configuration</a>
+
+    <div class="nav-section">Usage</div>
+    <a href="#running">Running</a>
+    <a href="#output">Output &amp; Progress</a>
+    <a href="#resume">Interrupting &amp; Resuming</a>
+    <a href="#moving-files">Moving Files</a>
+    <a href="#database">Querying the Database</a>
+
+    <div class="nav-section">How It Works</div>
+    <a href="#architecture">Architecture</a>
+    <a href="#flow">Download Flow</a>
+    <a href="#link-resolution">Link Resolution</a>
+    <a href="#schema">Database Schema</a>
+    <a href="#media-layout">Media Layout</a>
+
+    <div class="nav-section">Development</div>
+    <a href="#project-structure">Project Structure</a>
+    <a href="#modules">Module Reference</a>
+    <a href="#extending">Extending</a>
+    <a href="#safety">Safety &amp; Rate Limits</a>
+  </nav>
+
+  <!-- ── Main content ── -->
+  <main>
+
+    <!-- Overview -->
+    <section id="overview">
+      <h1>tg-down</h1>
+      <p class="subtitle">Download your Telegram Saved Messages to a local SQLite database and media directory — resumable, link-resolving, disk-aware.</p>
+
+      <div class="badges">
+        <span class="badge badge-blue">Python 3.10+</span>
+        <span class="badge badge-purple">Telethon</span>
+        <span class="badge badge-green">SQLite</span>
+        <span class="badge badge-yellow">Resumable</span>
+      </div>
+
+      <p>
+        <strong>tg-down</strong> connects to Telegram using the official MTProto API (via Telethon),
+        iterates your <em>Saved Messages</em> from oldest to newest, saves every message to a
+        local SQLite database, downloads attached media files, and resolves any
+        <code>t.me/…</code> links to capture their referenced content too.
+      </p>
+
+      <div class="callout callout-success">
+        <strong>✅ Read-only</strong>
+        tg-down never sends, edits, or deletes any messages. It only reads your Saved Messages
+        and fetches linked content.
+      </div>
+    </section>
+
+    <!-- Quick Start -->
+    <h2 id="quickstart">Quick Start</h2>
+
+    <ol class="steps">
+      <li>
+        <div class="content">
+          <strong>Get your Telegram API credentials</strong>
+          Visit <a href="https://my.telegram.org" target="_blank">my.telegram.org</a>,
+          log in, go to <em>API development tools</em>, and create an app to get your
+          <code>api_id</code> and <code>api_hash</code>.
+        </div>
+      </li>
+      <li>
+        <div class="content">
+          <strong>Install dependencies</strong>
+          <pre>pip install -r requirements.txt</pre>
+          <p style="margin-top:10px;color:var(--muted);font-size:0.85rem;">Installs <strong>telethon</strong>, <strong>cryptg</strong> (faster crypto), and <strong>PySocks</strong> (proxy support).</p>
+        </div>
+      </li>
+      <li>
+        <div class="content">
+          <strong>Edit config.json</strong>
+          Open <code>config.json</code> and fill in your credentials:
+<pre>{
+  <span class="str">"api_id"</span>: <span class="str">"12345678"</span>,
+  <span class="str">"api_hash"</span>: <span class="str">"your_api_hash_here"</span>
+}</pre>
+        </div>
+      </li>
+      <li>
+        <div class="content">
+          <strong>Run</strong>
+          <pre>python3 main.py</pre>
+          On first run, Telegram will ask for your phone number and a login code.
+          The session is saved to <code>tg_session.session</code> so future runs skip auth.
+        </div>
+      </li>
+    </ol>
+
+    <!-- Configuration -->
+    <h2 id="config">Configuration</h2>
+
+    <p>All options live in <code>config.json</code>. Only <code>api_id</code> and <code>api_hash</code> are required.</p>
+
+    <table>
+      <thead>
+        <tr><th>Key</th><th>Default</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>api_id</code></td><td><em>required</em></td><td>Telegram API ID from my.telegram.org</td></tr>
+        <tr><td><code>api_hash</code></td><td><em>required</em></td><td>Telegram API hash from my.telegram.org</td></tr>
+        <tr><td><code>session_name</code></td><td><code>tg_session</code></td><td>Name for the Telethon <code>.session</code> file</td></tr>
+        <tr><td><code>media_dir</code></td><td><code>./media</code></td><td>Root directory where media files are saved</td></tr>
+        <tr><td><code>db_path</code></td><td><code>./messages.db</code></td><td>Path to the SQLite database file</td></tr>
+        <tr><td><code>min_free_space_gb</code></td><td><code>10</code></td><td>Minimum free disk space (GB) required to run. Checked before start and every 50 messages.</td></tr>
+        <tr><td><code>batch_size</code></td><td><code>100</code></td><td>Number of messages fetched per Telegram API request</td></tr>
+        <tr><td><code>download_media</code></td><td><code>true</code></td><td>Set to <code>false</code> to save only text/metadata (no file downloads)</td></tr>
+        <tr><td><code>media_types</code></td><td>all types</td><td>Array of media types to download. Remove entries to skip them. Options: <code>photo</code>, <code>video</code>, <code>video_note</code>, <code>document</code>, <code>audio</code>, <code>voice</code>, <code>sticker</code>, <code>animation</code></td></tr>
+        <tr><td><code>max_file_size_mb</code></td><td><code>null</code></td><td>Skip media files larger than this size in MB. <code>null</code> = no limit.</td></tr>
+        <tr><td><code>resolve_tme_links</code></td><td><code>true</code></td><td>Detect <code>t.me/…</code> links in message text, fetch the referenced message, and save it to <code>resolved_messages</code></td></tr>
+        <tr><td><code>request_delay_seconds</code></td><td><code>0.5</code></td><td>Seconds to sleep between API calls. Increase if you see flood warnings.</td></tr>
+        <tr><td><code>proxy</code></td><td><code>null</code></td><td>SOCKS5/HTTP proxy. Accepts a URL string <strong>or</strong> a tuple array.<br>
+          Examples: <code>"socks5://127.0.0.1:1080"</code> &nbsp;·&nbsp; <code>"socks://host:port"</code> &nbsp;·&nbsp; <code>"http://host:port"</code> &nbsp;·&nbsp; <code>["socks5","127.0.0.1",1080]</code><br>
+          Requires <code>PySocks</code> (included in <code>requirements.txt</code>).</td></tr>
+        <tr><td><code>search_paths</code></td><td><code>[]</code></td><td>Extra directories to search for already-downloaded files before re-downloading. Useful when you've moved media to an external drive still mounted on this machine. Example: <code>["/mnt/external/tg-archive"]</code></td></tr>
+        <tr><td><code>skip_missing_media</code></td><td><code>false</code></td><td>If <code>true</code>, never re-download a file that is recorded in the DB but missing from disk (e.g. moved to another machine). Set to <code>true</code> to silence the startup prompt permanently.</td></tr>
+      </tbody>
+    </table>
+
+    <!-- Running -->
+    <h2 id="running">Running</h2>
+
+    <pre>python3 main.py</pre>
+
+    <p>The script will:</p>
+    <ul>
+      <li>Load and validate <code>config.json</code></li>
+      <li>Check disk space ≥ <code>min_free_space_gb</code></li>
+      <li>Connect to Telegram (prompts for auth on first run)</li>
+      <li>Iterate Saved Messages from oldest → newest</li>
+      <li>Save each message and download its media</li>
+    </ul>
+
+    <!-- Output -->
+    <h2 id="output">Output &amp; Progress</h2>
+
+    <p>Each processed message prints one line. Additional indented lines show media downloads and link resolution:</p>
+
+<pre class="log"><span class="ok">[OK]</span>    141.6 GB free on './media'.
+<span class="info">[INFO]</span> Connected to Telegram.
+<span class="info">[INFO]</span> Resuming from message ID &gt; 34921
+  <span class="msg">[1] ID=34922 2023-04-01 [text] Check out this article https://t.me/ch...</span>
+    <span class="link">[LINK]</span> Saved resolved content from https://t.me/channel/123
+  <span class="msg">[2] ID=34923 2023-04-01 [photo] My trip to Tokyo</span>
+  <span class="msg">[3] ID=34924 2023-04-02 [video]</span>
+    ↳ ████████████░░░░░░░░  61.2%  18.3 MB/29.4 MB  4.2 MB/s  [34924_twitter_clip.mp4]
+  <span class="msg">[4] ID=34925 2023-04-02 [document] Budget 2024</span>
+    <span class="warn">[SKIP]</span> Media too large (250.3 MB &gt; 100 MB)
+  <span class="msg">[5] ID=34926 2023-04-03 [text] https://t.me/deleted_channel/99</span>
+    <span class="warn">[WARN]</span> Error resolving https://t.me/deleted_channel/99: No user has ...
+<span class="info">[INFO]</span> 500 messages processed, 138.2 GB free …</pre>
+
+    <p>Log prefixes:</p>
+    <table>
+      <thead><tr><th>Prefix</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>[N] ID=…</code></td><td>Normal message processed</td></tr>
+        <tr><td><code>↳ █░ …/… speed [file]</code></td><td>Live download progress bar (rewrites in place)</td></tr>
+        <tr><td><code>[LINK]</code></td><td>t.me link successfully resolved and saved</td></tr>
+        <tr><td><code>[SKIP]</code></td><td>Media skipped (too large or excluded type)</td></tr>
+        <tr><td><code>[WARN]</code></td><td>Non-fatal problem (dead link, private channel, download error)</td></tr>
+        <tr><td><code>[FLOOD]</code></td><td>Telegram rate limit hit; script pauses automatically</td></tr>
+        <tr><td><code>[RETRY]</code></td><td>Network error on a file download; retrying with backoff</td></tr>
+        <tr><td><code>[RECONNECT]</code></td><td>Connection dropped mid-iteration; reconnecting automatically</td></tr>
+        <tr><td><code>[STARTUP]</code></td><td>Leftover <code>.tmp</code> files from a previous crash were cleaned up</td></tr>
+        <tr><td><code>[STOP]</code></td><td>Disk space fell below minimum; download halted safely</td></tr>
+      </tbody>
+    </table>
+
+    <!-- Resume -->
+    <h2 id="resume">Interrupting &amp; Resuming</h2>
+
+    <p>
+      Press <kbd>Ctrl+C</kbd> at any time. Progress is saved atomically after <em>every</em> message
+      (the DB row and the resume cursor are written in a single transaction), so you never lose work.
+    </p>
+
+    <p>Media files are downloaded to a <code>.tmp</code> file first, then renamed to the final name only on
+      success — so an interrupted download leaves no corrupt files. On the next startup, any stale
+      <code>.tmp</code> files are automatically deleted and re-downloaded from scratch.</p>
+
+    <p>Re-running <code>python3 main.py</code> automatically detects the saved cursor and continues from where it left off:</p>
+
+    <pre class="log"><span class="info">[INFO]</span> Resuming from message ID &gt; 34921</pre>
+
+    <div class="callout callout-info">
+      <strong>ℹ️ To restart from scratch</strong>
+      Delete <code>messages.db</code> (and optionally <code>media/</code>) then run again.
+      Or run this SQL: <code>DELETE FROM download_state WHERE key='last_saved_message_id';</code>
+    </div>
+
+    <!-- Moving files -->
+    <h2 id="moving-files">Moving Files to Another Machine</h2>
+
+    <p>
+      When disk space runs low, the script stops gracefully. You can move your downloaded media
+      to another machine (NAS, external server, etc.) to free up space, then continue.
+    </p>
+
+    <h3>Workflow</h3>
+    <ol class="steps">
+      <li>
+        <div class="content">
+          <strong>Script stops when disk is low</strong>
+          <pre class="log"><span class="warn">[STOP]</span> Disk space too low: 3.2 GB free (minimum 10 GB required). Stopping.</pre>
+        </div>
+      </li>
+      <li>
+        <div class="content">
+          <strong>Move your media files to free space</strong>
+          <pre>rsync -av ~/tg-down/media/ user@nas:/tg-archive/
+rm -rf ~/tg-down/media/video ~/tg-down/media/document</pre>
+        </div>
+      </li>
+      <li>
+        <div class="content">
+          <strong>Resume — answer the startup prompt</strong>
+          <pre class="log"><span class="info">[NOTICE]</span> 1,243 previously downloaded media file(s) are no longer on disk.
+  Skip re-downloading them and keep existing DB records? [y/N]: <strong>y</strong>
+  <span class="ok">[OK]</span> Missing files will be skipped.
+<span class="info">[INFO]</span> Resuming from message ID &gt; 69894</pre>
+          The script continues downloading <em>new</em> messages only.
+        </div>
+      </li>
+    </ol>
+
+    <p>
+      To skip the prompt permanently, set <code>"skip_missing_media": true</code> in <code>config.json</code>.
+    </p>
+
+    <h3>Re-indexing after moving within the same machine</h3>
+    <p>
+      If you moved files to a different path <em>on the same machine</em> (e.g. an external drive still mounted),
+      run <code>rescan.py</code> to update the DB paths — then tg-down won't re-download anything:
+    </p>
+    <pre>python3 rescan.py /mnt/external/tg-archive</pre>
+    <p>
+      Or add the path to <code>search_paths</code> in <code>config.json</code> and tg-down will find
+      files there automatically before attempting any download.
+    </p>
+
+    <div class="callout callout-info">
+      <strong>ℹ️ DB paths after moving</strong>
+      When <code>skip_missing_media</code> is on, the <code>media_path</code> column retains the
+      old (now stale) path. This is intentional — it records where the file <em>was</em> downloaded.
+      Run <code>rescan.py</code> afterwards if you want the column to reflect the new location.
+    </div>
+
+    <!-- Database -->
+    <h2 id="database">Querying the Database</h2>
+
+    <p>Open the database with any SQLite client (<code>sqlite3</code>, DB Browser for SQLite, etc.):</p>
+
+    <pre>sqlite3 messages.db</pre>
+
+    <p>Useful queries:</p>
+
+    <pre><span class="comment">-- Count all saved messages</span>
+<span class="kw">SELECT</span> <span class="fn">COUNT</span>(*) <span class="kw">FROM</span> messages;
+
+<span class="comment">-- Find messages containing a keyword</span>
+<span class="kw">SELECT</span> message_id, date, text <span class="kw">FROM</span> messages
+<span class="kw">WHERE</span> text <span class="kw">LIKE</span> <span class="str">'%recipe%'</span>;
+
+<span class="comment">-- All messages with downloaded media</span>
+<span class="kw">SELECT</span> message_id, date, media_type, media_path
+<span class="kw">FROM</span> messages <span class="kw">WHERE</span> media_path <span class="kw">IS NOT NULL</span>;
+
+<span class="comment">-- See what linked messages were fetched from a saved message</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> resolved_messages
+<span class="kw">WHERE</span> source_message_id = <span class="num">34922</span>;
+
+<span class="comment">-- Media breakdown by type</span>
+<span class="kw">SELECT</span> media_type, <span class="fn">COUNT</span>(*) <span class="kw">FROM</span> messages
+<span class="kw">GROUP BY</span> media_type <span class="kw">ORDER BY</span> <span class="fn">COUNT</span>(*) <span class="kw">DESC</span>;</pre>
+
+    <!-- Architecture -->
+    <h2 id="architecture">Architecture</h2>
+
+    <div class="arch">
+<span class="note">┌─────────────────────────────────────────────────────┐</span>
+<span class="note">│                     tg-down                         │</span>
+<span class="note">└─────────────────────────────────────────────────────┘</span>
+
+  <span class="box">main.py</span>
+    <span class="arr">│  load config · check disk space · start asyncio</span>
+    <span class="arr">▼</span>
+  <span class="box">downloader.py</span>  <span class="arr">────────────────────────────────</span>  <span class="box">Telegram MTProto API</span>
+    <span class="arr">│  iter_messages("me", reverse=True)</span>               <span class="arr">↕  (via Telethon)</span>
+    <span class="arr">│</span>
+    <span class="arr">├──▶  _get_media_type()   classify message</span>
+    <span class="arr">│</span>
+    <span class="arr">├──▶  _download_media()   fetch file bytes</span>
+    <span class="arr">│         │</span>
+    <span class="arr">│         └──▶  media/&lt;type&gt;/&lt;YYYY&gt;/&lt;MM&gt;/&lt;id&gt;.ext</span>
+    <span class="arr">│</span>
+    <span class="arr">├──▶  extract_tme_links()  <span class="lbl">(utils.py)</span></span>
+    <span class="arr">│         │  found t.me links?</span>
+    <span class="arr">│         └──▶  resolve_and_save()  ──▶  Telegram API</span>
+    <span class="arr">│                   └──▶  db.save_resolved_message()</span>
+    <span class="arr">│</span>
+    <span class="arr">└──▶  db.save_message()   <span class="lbl">(db.py)</span></span>
+              <span class="arr">└──▶  messages.db  (SQLite, WAL mode)</span>
+    </div>
+
+    <!-- Flow -->
+    <h2 id="flow">Download Flow</h2>
+
+    <p>For each message the following steps run in order:</p>
+
+    <ol>
+      <li><strong>Disk space check</strong> — every 50 messages, abort if below minimum</li>
+      <li><strong>Skip service messages</strong> — system events (call ended, user joined) have no content to save</li>
+      <li><strong>Classify media type</strong> — photo / video / document / audio / voice / sticker / animation / video_note</li>
+      <li><strong>Download media</strong> — if enabled, not too large, and type is allowed; skips if file already exists on disk</li>
+      <li><strong>Extract t.me links</strong> — regex scan of message text</li>
+      <li><strong>Resolve each link</strong> — fetch the referenced message via Telegram API, download its media, save to <code>resolved_messages</code></li>
+      <li><strong>Save to DB</strong> — write message record</li>
+      <li><strong>Advance cursor</strong> — update <code>download_state.last_saved_message_id</code></li>
+      <li><strong>Rate limit delay</strong> — <code>request_delay_seconds</code> sleep</li>
+    </ol>
+
+    <!-- Link Resolution -->
+    <h2 id="link-resolution">Link Resolution</h2>
+
+    <p>When <code>resolve_tme_links</code> is <code>true</code>, the script scans every message's text for two URL patterns:</p>
+
+    <table>
+      <thead><tr><th>Pattern</th><th>Example</th><th>Type</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>t.me/&lt;username&gt;/&lt;id&gt;</code></td>
+          <td><code>https://t.me/durov/123</code></td>
+          <td>Public channel / user</td>
+        </tr>
+        <tr>
+          <td><code>t.me/c/&lt;channel_id&gt;/&lt;id&gt;</code></td>
+          <td><code>https://t.me/c/1520146127/99</code></td>
+          <td>Private channel (must be a member)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>The resolved message is saved in the <code>resolved_messages</code> table linked back to its source via <code>source_message_id</code>. Common warn cases:</p>
+    <ul>
+      <li><strong>"No user has X as username"</strong> — the channel/account was deleted or renamed</li>
+      <li><strong>"Could not find input entity"</strong> — private channel you're not a member of</li>
+    </ul>
+    <p>These are harmless — the original saved message is still recorded.</p>
+
+    <!-- DB Schema -->
+    <h2 id="schema">Database Schema</h2>
+
+    <h3>messages</h3>
+    <p>One row per Saved Message.</p>
+    <table>
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment row ID</td></tr>
+        <tr><td><code>message_id</code></td><td>INTEGER UNIQUE</td><td>Telegram message ID</td></tr>
+        <tr><td><code>date</code></td><td>TEXT</td><td>ISO 8601 timestamp</td></tr>
+        <tr><td><code>text</code></td><td>TEXT</td><td>Message text (may be null for media-only)</td></tr>
+        <tr><td><code>media_type</code></td><td>TEXT</td><td>photo / video / document / … / null</td></tr>
+        <tr><td><code>media_path</code></td><td>TEXT</td><td>Relative path under <code>media_dir</code>, or null</td></tr>
+        <tr><td><code>from_id</code></td><td>INTEGER</td><td>Sender user ID</td></tr>
+        <tr><td><code>reply_to_msg_id</code></td><td>INTEGER</td><td>ID of replied-to message, or null</td></tr>
+        <tr><td><code>is_link_resolved</code></td><td>INTEGER</td><td>1 if t.me links were found and processed</td></tr>
+        <tr><td><code>resolved_from_url</code></td><td>TEXT</td><td>Reserved for future use</td></tr>
+        <tr><td><code>raw_json</code></td><td>TEXT</td><td>Full Telethon message object as JSON</td></tr>
+        <tr><td><code>downloaded_at</code></td><td>TEXT</td><td>UTC timestamp when row was inserted</td></tr>
+      </tbody>
+    </table>
+
+    <h3>resolved_messages</h3>
+    <p>Content fetched by following t.me links. Same columns as <code>messages</code> plus <code>source_message_id</code> and <code>peer</code>.</p>
+
+    <h3>download_state</h3>
+    <p>Simple key-value store. Currently stores one key: <code>last_saved_message_id</code> — the resume cursor.</p>
+
+    <!-- Media Layout -->
+    <h2 id="media-layout">Media Layout</h2>
+
+    <div class="filetree">
+<span class="dir">media/</span>
+  <span class="dir">photo/</span>
+    <span class="dir">2024/01/</span>
+      <span class="file">123456789.jpg</span>       <span class="desc">← named by Telegram message ID</span>
+      <span class="file">123456790.jpg</span>
+    <span class="dir">2024/02/</span>
+      <span class="file">200000001.jpg</span>
+  <span class="dir">video/</span>
+    <span class="dir">2024/01/</span>
+      <span class="file">123456791.mp4</span>
+  <span class="dir">document/</span>
+    <span class="dir">2024/03/</span>
+      <span class="file">123456800.pdf</span>       <span class="desc">← original extension preserved</span>
+      <span class="file">123456801.xlsx</span>
+  <span class="dir">audio/</span>
+  <span class="dir">voice/</span>
+  <span class="dir">sticker/</span>
+  <span class="dir">animation/</span>
+  <span class="dir">video_note/</span>
+    </div>
+
+    <p>File names are <code>{message_id}_{name_hint}{ext}</code>. The name hint comes from (in priority order):</p>
+    <ol>
+      <li>The document's original filename (e.g. <code>report.xlsx</code> → <code>98765_report.xlsx</code>)</li>
+      <li>The message text snippet, sanitised for the filesystem (e.g. <code>98765_My_trip_to_Tokyo.jpg</code>)</li>
+      <li>Just the message ID if neither is available (e.g. <code>98765.mp4</code>)</li>
+    </ol>
+    <p>If a cached file exists but its size doesn't match Telegram's reported size, it is deleted and re-downloaded.</p>
+
+    <!-- Project Structure -->
+    <h2 id="project-structure">Project Structure</h2>
+
+    <div class="filetree">
+<span class="dir">tg-down/</span>
+  <span class="file">main.py</span>           <span class="desc">← entry point; config loading, disk check, asyncio.run()</span>
+  <span class="file">downloader.py</span>    <span class="desc">← core async download loop, media handling, link resolution</span>
+  <span class="file">db.py</span>             <span class="desc">← all SQLite operations (schema, read, write)</span>
+  <span class="file">utils.py</span>          <span class="desc">← config loader, disk space, proxy parser, t.me link extractor</span>
+  <span class="file">rescan.py</span>         <span class="desc">← re-index media files into DB after moving them</span>
+  <span class="file">config.json</span>       <span class="desc">← user configuration</span>
+  <span class="file">requirements.txt</span>  <span class="desc">← telethon, cryptg, PySocks</span>
+  <span class="file">README.html</span>       <span class="desc">← this file</span>
+  <span class="file">tg_session.session</span> <span class="desc">← created on first run; stores your login session</span>
+  <span class="file">messages.db</span>       <span class="desc">← created on first run; the SQLite database</span>
+    </div>
+
+    <!-- Module Reference -->
+    <h2 id="modules">Module Reference</h2>
+
+    <h3>main.py</h3>
+    <p>Loads config via <code>utils.load_config()</code>, asserts disk space, then calls <code>asyncio.run(downloader.run_download(cfg))</code>. No logic beyond startup validation.</p>
+
+    <h3>downloader.py</h3>
+    <p>Contains all async Telethon logic:</p>
+    <ul>
+      <li><code>run_download(cfg)</code> — main loop; creates the <code>TelegramClient</code>, iterates messages, orchestrates saving</li>
+      <li><code>_get_media_type(message)</code> — classifies a <code>Message</code> object; returns <code>None</code> for non-<code>Message</code> types (e.g. <code>MessageService</code>)</li>
+      <li><code>_message_to_dict(message)</code> — extracts scalar fields from a Telethon message into a plain dict</li>
+      <li><code>_download_media(client, message, media_dir, cfg)</code> — downloads a file, enforces size limit, returns relative path</li>
+      <li><code>resolve_and_save(client, source_id, link_info, cfg)</code> — fetches a linked message and persists it</li>
+    </ul>
+
+    <h3>db.py</h3>
+    <p>Thin SQLite wrapper. All functions open and close a connection via the <code>get_conn()</code> context manager (WAL mode, auto-commit/rollback).</p>
+    <ul>
+      <li><code>init_db(db_path)</code> — creates tables and indexes if they don't exist</li>
+      <li><code>save_message_and_advance(db_path, data, id)</code> — upsert message row + advance resume cursor atomically</li>
+      <li><code>save_resolved_message(db_path, source_id, peer, data)</code> — insert resolved link content</li>
+      <li><code>get_state / set_state</code> — read/write key-value state (resume cursor)</li>
+      <li><code>get_media_path(db_path, message_id)</code> — return recorded media_path for a message</li>
+      <li><code>get_missing_media_count(db_path)</code> — count DB records whose media file is absent from disk</li>
+      <li><code>get_stats(db_path)</code> — return counts for the session summary</li>
+    </ul>
+
+    <h3>utils.py</h3>
+    <ul>
+      <li><code>load_config(path)</code> — parse JSON, validate required keys, fill defaults</li>
+      <li><code>check_disk_space(path, min_gb)</code> — return bool</li>
+      <li><code>free_space_gb(path)</code> — return float</li>
+      <li><code>extract_tme_links(text)</code> — regex scan, return list of <code>{url, peer, msg_id}</code> dicts</li>
+      <li><code>parse_proxy(proxy)</code> — convert URL string or list to Telethon-compatible tuple</li>
+      <li><code>safe_filename(name, max_len)</code> — strip filesystem-unsafe characters and collapse whitespace</li>
+    </ul>
+
+    <h3>rescan.py</h3>
+    <p>Standalone utility — no async, no Telegram connection needed.</p>
+    <ul>
+      <li>Walks one or more directories, extracts message IDs from filenames (<code>{id}_name.ext</code>)</li>
+      <li>Updates <code>media_path</code> in <code>messages</code> and <code>resolved_messages</code> to the new location</li>
+      <li>Reports ambiguous matches (multiple files for same ID) and skips them safely</li>
+    </ul>
+    <pre>python3 rescan.py                   <span class="comment"># scan media_dir + search_paths from config</span>
+python3 rescan.py /mnt/nas/archive  <span class="comment"># scan a specific directory</span>
+python3 rescan.py /vol1 /vol2       <span class="comment"># scan multiple directories</span></pre>
+
+    <!-- Extending -->
+    <h2 id="extending">Extending</h2>
+
+    <h3>Add a new media type</h3>
+    <p>Add a detection branch in <code>_get_media_type()</code> in <code>downloader.py</code> and add the type string to the <code>media_types</code> default in <code>utils.py</code>.</p>
+
+    <h3>Export to another format</h3>
+    <p>The <code>raw_json</code> column stores the full Telethon message object. You can read the DB and <code>json.loads(raw_json)</code> to get every field Telegram exposes:</p>
+    <pre><span class="kw">import</span> sqlite3, json
+conn = sqlite3.<span class="fn">connect</span>(<span class="str">"messages.db"</span>)
+<span class="kw">for</span> row <span class="kw">in</span> conn.<span class="fn">execute</span>(<span class="str">"SELECT raw_json FROM messages"</span>):
+    msg = json.<span class="fn">loads</span>(row[<span class="num">0</span>])
+    <span class="fn">print</span>(msg)</pre>
+
+    <h3>Change storage backend</h3>
+    <p>All database operations are isolated in <code>db.py</code>. Replace the SQLite calls with any other store (PostgreSQL, JSON files, etc.) without touching <code>downloader.py</code>.</p>
+
+    <h3>Add CLI arguments</h3>
+    <p>Import <code>argparse</code> in <code>main.py</code> and override config values after <code>load_config()</code>. For example, <code>--no-media</code> can set <code>cfg["download_media"] = False</code>.</p>
+
+    <!-- Safety -->
+    <h2 id="safety">Safety &amp; Rate Limits</h2>
+
+    <div class="callout callout-warn">
+      <strong>⚠️ Protect your session file</strong>
+      <code>tg_session.session</code> contains your Telegram login. Treat it like a password —
+      don't share it or commit it to version control.
+    </div>
+
+    <h3>Built-in safeguards</h3>
+    <table>
+      <thead><tr><th>Safeguard</th><th>Details</th></tr></thead>
+      <tbody>
+        <tr><td>Read-only API usage</td><td>Only <code>get_messages</code> and <code>iter_messages</code> are called. No writes to Telegram.</td></tr>
+        <tr><td>Rate limit delay</td><td><code>request_delay_seconds</code> (default 0.5 s) between every API call</td></tr>
+        <tr><td>FloodWait handler</td><td>If Telegram returns a flood-wait error, the script pauses for exactly the required duration and retries</td></tr>
+        <tr><td>Automatic reconnect</td><td>On any network error the script waits with exponential backoff (5 s → 10 s → … → 5 min cap) and reconnects, resuming from the last saved message</td></tr>
+        <tr><td>Media download retry</td><td>Per-file network errors trigger the same backoff loop; the partial <code>.tmp</code> file is deleted before each retry</td></tr>
+        <tr><td>Atomic file writes</td><td>Files are written to <code>filename.tmp</code> and renamed on completion — a crash never leaves a corrupt file that would be mistaken for a complete one</td></tr>
+        <tr><td>File size validation</td><td>Before skipping a cached file, its size is compared to Telegram's reported size; mismatches trigger a re-download</td></tr>
+        <tr><td>Atomic DB commit</td><td>The message row and the resume cursor are written in a single SQLite transaction — no split-brain state on crash</td></tr>
+        <tr><td>Disk space guard</td><td>Checked before start and every 50 messages; stops gracefully if free space falls below <code>min_free_space_gb</code></td></tr>
+        <tr><td>File size cap</td><td><code>max_file_size_mb</code> skips oversized media files</td></tr>
+        <tr><td>Startup cleanup</td><td>Any leftover <code>.tmp</code> files from a previous crash are removed at startup</td></tr>
+        <tr><td>Idempotent downloads</td><td>If a correctly-sized file already exists on disk, it is not re-downloaded</td></tr>
+        <tr><td>Graceful interrupt</td><td>Ctrl+C saves progress before exiting; <code>KeyboardInterrupt</code> is never swallowed mid-operation</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Recommendations</h3>
+    <ul>
+      <li>Keep <code>request_delay_seconds</code> ≥ 0.3 to stay within Telegram's limits</li>
+      <li>If you have many messages with t.me links, consider setting <code>resolve_tme_links</code> to <code>false</code> on first pass, then re-enable for a second pass — link resolution doubles the number of API calls</li>
+      <li>Add <code>tg_session.session</code> and <code>messages.db</code> to <code>.gitignore</code> if working in a git repo</li>
+    </ul>
+
+  </main>
+</div>
+
+<script>
+  // Highlight active nav link on scroll
+  const sections = document.querySelectorAll("section[id], h2[id]");
+  const links = document.querySelectorAll("nav a");
+
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => l.classList.remove("active"));
+        const active = document.querySelector(`nav a[href="#${e.target.id}"]`);
+        if (active) active.classList.add("active");
+      }
+    });
+  }, { rootMargin: "-20% 0px -70% 0px" });
+
+  sections.forEach(s => observer.observe(s));
+</script>
+
+</body>
+</html>

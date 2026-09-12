@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# tg-down runtime artefacts — never commit secrets or downloads
+config.json
+*.session
+*.session-journal
+*.session-wal
+*.session-shm
+*.db
+*.db-wal
+*.db-shm
+*.tmp
+media/
+downloads/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/

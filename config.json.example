@@ -1,0 +1,18 @@
+{
+    "api_id": "YOUR_API_ID_HERE",
+    "api_hash": "YOUR_API_HASH_HERE",
+    "session_name": "tg_session",
+    "media_dir": "./media",
+    "db_path": "./messages.db",
+    "min_free_space_gb": 10,
+    "batch_size": 100,
+    "download_media": true,
+    "media_types": ["photo", "video", "video_note", "document", "audio", "voice", "sticker", "animation"],
+    "max_file_size_mb": null,
+    "resolve_tme_links": true,
+    "request_delay_seconds": 0.5,
+    "proxy": null,
+    "search_paths": [],
+    "skip_missing_media": false,
+    "group_scan_window": 12
+}
