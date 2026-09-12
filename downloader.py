@@ -71,10 +71,13 @@ MAX_RETRIES = 0
 RETRY_BASE_DELAY = 5     # seconds
 RETRY_MAX_DELAY  = 300   # seconds (5 min cap)
 
-# Parallel download settings
-_PARALLEL_THRESHOLD_MB = 5   # files >= 5 MB use parallel chunk download
-_PARALLEL_WORKERS = 4        # concurrent chunk-download coroutines
-_CHUNK_SIZE = 512 * 1024     # bytes per chunk (must be a multiple of 4 096)
+# Parallel download settings — mirrors the official clients:
+# tdesktop uses kMaxFileQueries = 16 in-flight 128 KB parts per file
+# (Telegram/SourceFiles/storage/file_download.cpp); MTProto executes the
+# concurrent part requests in parallel server-side over the connection.
+_PARALLEL_THRESHOLD_MB = 2    # files >= 2 MB use parallel download (16 x 128 KB = one full round)
+_PARALLEL_WORKERS = 16        # concurrent in-flight part requests (official: 16)
+_CHUNK_SIZE = 128 * 1024      # bytes per part (official kPartSize; must divide 1 MB and be a multiple of 4 096)
 
 # Progress display settings
 _PROGRESS_UPDATE_INTERVAL = 0.75  # seconds between terminal refreshes
