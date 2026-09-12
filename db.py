@@ -228,6 +228,46 @@ def find_media_path_by_fingerprint(
     return None
 
 
+def get_resolved_media_path(
+    db_path: str,
+    source_message_id: int,
+    peer: str,
+    message_id: int,
+) -> str | None:
+    """Return the recorded media_path for one resolved (linked) message.
+
+    NOTE: resolved message IDs are only unique per (source, peer) — never
+    look them up by message_id alone, or rows from unrelated chats collide.
+    """
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT media_path FROM resolved_messages "
+            "WHERE source_message_id = ? AND peer = ? AND message_id = ?",
+            (source_message_id, str(peer), message_id),
+        ).fetchone()
+    return row["media_path"] if row else None
+
+
+def set_media_path_by_rowid(
+    db_path: str,
+    table: str,
+    rowid: int,
+    media_path: str,
+):
+    """Update one row's media_path (by rowid) and keep the media_index in sync."""
+    assert table in ("messages", "resolved_messages"), table
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            f"SELECT raw_json FROM {table} WHERE id = ?", (rowid,)
+        ).fetchone()
+        conn.execute(
+            f"UPDATE {table} SET media_path = ? WHERE id = ?",
+            (media_path, rowid),
+        )
+        fingerprint = _extract_media_fingerprint(row["raw_json"]) if row else None
+        _upsert_media_index(conn, fingerprint, media_path)
+
+
 def save_message(db_path: str, msg_data: dict):
     now = datetime.utcnow().isoformat()
     with get_conn(db_path) as conn:

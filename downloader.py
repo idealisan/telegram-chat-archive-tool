@@ -2,6 +2,7 @@
 
 import asyncio
 import mimetypes
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -97,7 +98,7 @@ def _make_progress_callback(total: int | None, filename: str):
             )
 
         # Truncate to terminal width so the line never wraps
-        width = min(120, (getattr(sys.stdout, 'columns', None) or 120))
+        width = min(120, shutil.get_terminal_size(fallback=(120, 24)).columns)
         sys.stdout.write("\r" + line[:width].ljust(width))
         sys.stdout.flush()
 
@@ -203,20 +204,21 @@ def _get_media_type(message) -> str | None:
 
 
 def _message_to_dict(message) -> dict:
+    from_id = getattr(message, "from_id", None)
+    if from_id is not None:
+        # PeerUser has user_id; PeerChannel/PeerChat carry channel_id/chat_id.
+        from_id = (
+            getattr(from_id, "user_id", None)
+            or getattr(from_id, "channel_id", None)
+            or getattr(from_id, "chat_id", None)
+        )
+    reply = getattr(message, "reply_to", None)
     return {
         "message_id": message.id,
         "date": message.date.isoformat() if message.date else None,
         "text": message.text or message.message,
-        "from_id": (
-            message.from_id.user_id
-            if hasattr(message, "from_id") and message.from_id and hasattr(message.from_id, "user_id")
-            else None
-        ),
-        "reply_to_msg_id": (
-            message.reply_to.reply_to_msg_id
-            if message.reply_to
-            else None
-        ),
+        "from_id": from_id,
+        "reply_to_msg_id": getattr(reply, "reply_to_msg_id", None),
         "raw_json": message.to_dict(),
     }
 
@@ -236,8 +238,17 @@ def _get_existing_media_path(
     message,
     *,
     skip_missing: bool,
+    allow_same_id: bool = True,
 ) -> str | None:
-    existing_path = db.get_media_path(db_path, message.id)
+    """Return a reusable media path for *message*, or None to force download.
+
+    allow_same_id=False must be used for linked (resolved) messages: their
+    numeric IDs live in other chats, so a messages-table hit on the same ID
+    would be a different file entirely. Fingerprint matching is still allowed.
+    """
+    existing_path = (
+        db.get_media_path(db_path, message.id) if allow_same_id else None
+    )
     if not existing_path:
         existing_path = db.find_media_path_by_fingerprint(
             db_path,
@@ -350,8 +361,20 @@ async def _download_parallel_chunks(
         await asyncio.gather(*[_worker(i) for i in range(n_workers)])
 
 
-async def _download_media(client, message, media_dir: str, cfg: dict) -> str | None:
-    """Download message media and return relative path, or None."""
+async def _download_media(
+    client,
+    message,
+    media_dir: str,
+    cfg: dict,
+    *,
+    subfolder: str | None = None,
+) -> str | None:
+    """Download message media and return relative path, or None.
+
+    *subfolder* namespaces files that don't belong to Saved Messages itself
+    (e.g. ``resolved/<peer>`` for t.me-linked content) so identical numeric
+    message IDs from different chats can never overwrite each other.
+    """
     media_type = _get_media_type(message)
     if not media_type or media_type == "webpage":
         return None
@@ -374,7 +397,8 @@ async def _download_media(client, message, media_dir: str, cfg: dict) -> str | N
             return None
 
     date_str = message.date.strftime("%Y/%m") if message.date else "unknown"
-    dest_dir = Path(media_dir) / media_type / date_str
+    base_dir = Path(media_dir) / (subfolder or media_type)
+    dest_dir = base_dir / date_str
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     # Build a human-readable filename: {message_id}_{name_hint}{ext}
@@ -420,19 +444,27 @@ async def _download_media(client, message, media_dir: str, cfg: dict) -> str | N
             print(f"    [WARN] Cached file size mismatch for msg {message.id}, re-downloading …")
             dest_path.unlink()
 
-    # Check search_paths — user may have moved files to free up space
+    # Check search_paths — user may have moved files to free up space.
+    # Paths under media_dir are normalised to relative form so the DB stays
+    # portable across machines; anything else stays absolute.
+    def _store_path(candidate: Path) -> str:
+        try:
+            return str(candidate.relative_to(media_dir))
+        except ValueError:
+            return str(candidate)
+
     for search_dir in cfg.get("search_paths", []):
         for candidate in Path(search_dir).rglob(f"{message.id}_*{ext}"):
             if candidate.is_file():
                 if known_size is None or candidate.stat().st_size == known_size:
                     print(f"    [FOUND] Located in search path: {candidate}")
-                    return str(candidate)
+                    return _store_path(candidate)
         # Also try exact filename match without name hint
-        candidate = Path(search_dir) / media_type / date_str / filename
+        candidate = Path(search_dir) / (subfolder or media_type) / date_str / filename
         if candidate.is_file():
             if known_size is None or candidate.stat().st_size == known_size:
                 print(f"    [FOUND] Located in search path: {candidate}")
-                return str(candidate)
+                return _store_path(candidate)
 
     progress = _make_progress_callback(known_size, filename)
 
@@ -491,8 +523,16 @@ async def resolve_and_save(
     source_message_id: int,
     link_info: dict,
     cfg: dict,
-):
-    """Fetch the message pointed to by a t.me link and persist it."""
+) -> bool:
+    """Fetch the message pointed to by a t.me link and persist it.
+
+    Returns True only if the linked content was actually fetched and stored
+    (so the caller can mark the source message resolved honestly). Returns
+    False on rate-limit/network errors or failed media downloads — those stay
+    unresolved so a later --full-scan can backfill them. A linked message
+    that is definitively gone (deleted / no access) returns True: retrying
+    would never succeed.
+    """
     db_path = cfg["db_path"]
     media_dir = cfg["media_dir"]
     peer = link_info["peer"]
@@ -503,13 +543,16 @@ async def resolve_and_save(
         msgs = await client.get_messages(peer, ids=msg_id)
         if not msgs:
             print(f"    [WARN] Could not resolve link {url}")
-            return
+            return True
         linked_msg = msgs if not isinstance(msgs, list) else msgs[0]
         if linked_msg is None:
             print(f"    [WARN] Linked message not found: {url}")
-            return
+            return True
 
+        peer_label = utils.safe_filename(str(peer), max_len=48) or "unknown"
+        subfolder = f"resolved/{peer_label}"
         linked_messages = await _expand_grouped_messages(client, peer, linked_msg, cfg)
+        all_ok = True
         for linked_member in linked_messages:
             data = _message_to_dict(linked_member)
             media_type = _get_media_type(linked_member)
@@ -523,11 +566,16 @@ async def resolve_and_save(
                     cfg,
                     linked_member,
                     skip_missing=cfg.get("skip_missing_media", False),
+                    allow_same_id=False,
                 )
                 if existing_path:
                     data["media_path"] = existing_path
                 else:
-                    data["media_path"] = await _download_media(client, linked_member, media_dir, cfg)
+                    data["media_path"] = await _download_media(
+                        client, linked_member, media_dir, cfg, subfolder=subfolder
+                    )
+                    if media_type and not data["media_path"]:
+                        all_ok = False
             else:
                 data["media_path"] = None
 
@@ -540,14 +588,17 @@ async def resolve_and_save(
             )
         else:
             print(f"    [LINK] Saved resolved content from {url}")
+        return all_ok
 
     except FloodWaitError as e:
         print(f"    [FLOOD] Waiting {e.seconds}s for link resolution …")
         await asyncio.sleep(e.seconds + 1)
+        return False
     except KeyboardInterrupt:
         raise
     except Exception as exc:
         print(f"    [WARN] Error resolving {url}: {exc}")
+        return False
 
 
 async def run_download(cfg: dict, *, full_scan: bool = False):
@@ -632,7 +683,14 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
                             print(f"[INFO] {total} messages processed, {free:.1f} GB free …")
 
                     # Skip service messages (user joined, call ended, etc.)
+                    # but still advance the resume cursor past them, or every
+                    # run would re-scan the same trailing range.
                     if isinstance(message, MessageService):
+                        highest_seen_id = max(highest_seen_id, message.id)
+                        if full_scan:
+                            session_resume_id = message.id
+                        else:
+                            db.set_state(db_path, "last_saved_message_id", str(message.id))
                         continue
 
                     highest_seen_id = max(highest_seen_id, message.id)
@@ -667,10 +725,14 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
                     tme_links = utils.extract_tme_links(text) if cfg.get("resolve_tme_links") else []
 
                     if tme_links:
-                        data["is_link_resolved"] = True
+                        links_ok = True
                         for link_info in tme_links:
-                            await resolve_and_save(client, message.id, link_info, cfg)
+                            ok = await resolve_and_save(client, message.id, link_info, cfg)
+                            links_ok = links_ok and ok
                             await asyncio.sleep(delay)
+                        # Only mark resolved when every link actually succeeded;
+                        # failures stay 0 so a later --full-scan can backfill them.
+                        data["is_link_resolved"] = links_ok
 
                     if full_scan:
                         db.save_message(db_path, data)

@@ -79,5 +79,6 @@ media/
   photo/2024/05/123456789.jpg
   video/2024/05/987654321.mp4
   document/2024/06/111111111.pdf
+  resolved/<peer>/photo/2024/05/222222222.jpg   # media of t.me-linked messages, namespaced per chat
   ...
 ```
