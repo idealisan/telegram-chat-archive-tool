@@ -7,10 +7,13 @@ from datetime import datetime
 from pathlib import Path
 
 
-SCHEMA = """
+# NOTE: _MESSAGES_TABLE_SQL / _RESOLVED_TABLE_SQL are reused by the
+# migration in init_db (peer columns did not exist in older databases).
+_MESSAGES_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS messages (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id        INTEGER UNIQUE NOT NULL,
+    peer              TEXT NOT NULL DEFAULT 'me',
+    message_id        INTEGER NOT NULL,
     date              TEXT,
     text              TEXT,
     media_type        TEXT,
@@ -21,11 +24,15 @@ CREATE TABLE IF NOT EXISTS messages (
     is_link_resolved  INTEGER DEFAULT 0,
     resolved_from_url TEXT,
     raw_json          TEXT,
-    downloaded_at     TEXT NOT NULL
+    downloaded_at     TEXT NOT NULL,
+    UNIQUE(peer, message_id)
 );
+"""
 
+_RESOLVED_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS resolved_messages (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    dialog_peer       TEXT NOT NULL DEFAULT 'me',
     source_message_id INTEGER NOT NULL,
     peer              TEXT NOT NULL,
     message_id        INTEGER NOT NULL,
@@ -36,9 +43,14 @@ CREATE TABLE IF NOT EXISTS resolved_messages (
     media_status      TEXT,
     raw_json          TEXT,
     downloaded_at     TEXT NOT NULL,
-    UNIQUE(source_message_id, peer, message_id)
+    UNIQUE(dialog_peer, source_message_id, peer, message_id)
 );
+"""
 
+SCHEMA = (
+    _MESSAGES_TABLE_SQL
+    + _RESOLVED_TABLE_SQL
+    + """
 CREATE TABLE IF NOT EXISTS download_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -53,6 +65,7 @@ CREATE TABLE IF NOT EXISTS media_index (
 CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id);
 CREATE INDEX IF NOT EXISTS idx_resolved_source ON resolved_messages(source_message_id);
 """
+)
 
 
 @contextmanager
@@ -82,6 +95,83 @@ def init_db(db_path: str):
             except sqlite3.OperationalError as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
+        _migrate_peer_columns(conn)
+        _migrate_cursor_key(conn)
+
+
+def _column_names(conn, table: str) -> list:
+    return [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def _migrate_peer_columns(conn):
+    """Add per-dialog namespacing to pre-existing databases.
+
+    Old tables keyed rows by message_id alone, which collides across chats.
+    Rebuild both tables with peer/dialog_peer columns (old rows belong to
+    Saved Messages, i.e. peer 'me'). Idempotent: skipped once migrated.
+    """
+    if "peer" not in _column_names(conn, "messages"):
+        conn.execute("ALTER TABLE messages RENAME TO messages_legacy")
+        conn.execute(_MESSAGES_TABLE_SQL)
+        conn.execute(
+            """
+            INSERT INTO messages
+                (id, peer, message_id, date, text, media_type, media_path,
+                 media_status, from_id, reply_to_msg_id, is_link_resolved,
+                 resolved_from_url, raw_json, downloaded_at)
+            SELECT id, 'me', message_id, date, text, media_type, media_path,
+                 media_status, from_id, reply_to_msg_id, is_link_resolved,
+                 resolved_from_url, raw_json, downloaded_at
+            FROM messages_legacy
+            """
+        )
+        conn.execute("DROP TABLE messages_legacy")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)"
+        )
+    if "dialog_peer" not in _column_names(conn, "resolved_messages"):
+        conn.execute("ALTER TABLE resolved_messages RENAME TO resolved_messages_legacy")
+        conn.execute(_RESOLVED_TABLE_SQL)
+        conn.execute(
+            """
+            INSERT INTO resolved_messages
+                (id, dialog_peer, source_message_id, peer, message_id, date,
+                 text, media_type, media_path, media_status, raw_json, downloaded_at)
+            SELECT id, 'me', source_message_id, peer, message_id, date,
+                 text, media_type, media_path, media_status, raw_json, downloaded_at
+            FROM resolved_messages_legacy
+            """
+        )
+        conn.execute("DROP TABLE resolved_messages_legacy")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_resolved_source "
+            "ON resolved_messages(source_message_id)"
+        )
+
+
+def _migrate_cursor_key(conn):
+    """Move the legacy global resume cursor to the per-dialog key for 'me'."""
+    legacy = conn.execute(
+        "SELECT value FROM download_state WHERE key = 'last_saved_message_id'"
+    ).fetchone()
+    if legacy is None:
+        return
+    current = conn.execute(
+        "SELECT value FROM download_state WHERE key = 'cursor:me'"
+    ).fetchone()
+    if current is None:
+        conn.execute(
+            "INSERT INTO download_state (key, value) VALUES ('cursor:me', ?)",
+            (legacy["value"],),
+        )
+    conn.execute(
+        "DELETE FROM download_state WHERE key = 'last_saved_message_id'"
+    )
+
+
+def cursor_key(peer: str) -> str:
+    """Resume-cursor key in download_state for one dialog."""
+    return f"cursor:{peer}"
 
 
 def resolve_media_path(
@@ -135,16 +225,27 @@ def get_missing_media_count(
     db_path: str,
     media_dir: str,
     search_paths: list[str] | None = None,
+    peer: str | None = None,
 ) -> int:
     """Count DB records that have a media_path but the file no longer exists on disk."""
     with get_conn(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT media_path FROM messages WHERE media_path IS NOT NULL
-            UNION ALL
-            SELECT media_path FROM resolved_messages WHERE media_path IS NOT NULL
-            """
-        ).fetchall()
+        if peer is None:
+            rows = conn.execute(
+                """
+                SELECT media_path FROM messages WHERE media_path IS NOT NULL
+                UNION ALL
+                SELECT media_path FROM resolved_messages WHERE media_path IS NOT NULL
+                """
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT media_path FROM messages WHERE peer = ? AND media_path IS NOT NULL
+                UNION ALL
+                SELECT media_path FROM resolved_messages WHERE dialog_peer = ? AND media_path IS NOT NULL
+                """,
+                (peer, peer),
+            ).fetchall()
     return sum(
         1
         for r in rows
@@ -152,11 +253,12 @@ def get_missing_media_count(
     )
 
 
-def get_media_path(db_path: str, message_id: int) -> str | None:
-    """Return the recorded media_path for a message, or None."""
+def get_media_path(db_path: str, peer: str, message_id: int) -> str | None:
+    """Return the recorded media_path for a message in one dialog, or None."""
     with get_conn(db_path) as conn:
         row = conn.execute(
-            "SELECT media_path FROM messages WHERE message_id = ?", (message_id,)
+            "SELECT media_path FROM messages WHERE peer = ? AND message_id = ?",
+            (peer, message_id),
         ).fetchone()
     return row["media_path"] if row else None
 
@@ -239,20 +341,21 @@ def find_media_path_by_fingerprint(
 
 def get_resolved_media_path(
     db_path: str,
+    dialog_peer: str,
     source_message_id: int,
     peer: str,
     message_id: int,
 ) -> str | None:
     """Return the recorded media_path for one resolved (linked) message.
 
-    NOTE: resolved message IDs are only unique per (source, peer) — never
-    look them up by message_id alone, or rows from unrelated chats collide.
+    NOTE: resolved message IDs are only unique per (dialog, source, peer) —
+    never look them up by message_id alone, or rows from unrelated chats collide.
     """
     with get_conn(db_path) as conn:
         row = conn.execute(
             "SELECT media_path FROM resolved_messages "
-            "WHERE source_message_id = ? AND peer = ? AND message_id = ?",
-            (source_message_id, str(peer), message_id),
+            "WHERE dialog_peer = ? AND source_message_id = ? AND peer = ? AND message_id = ?",
+            (dialog_peer, source_message_id, str(peer), message_id),
         ).fetchone()
     return row["media_path"] if row else None
 
@@ -281,17 +384,18 @@ def set_media_path_by_rowid(
         _upsert_media_index(conn, fingerprint, media_path)
 
 
-def save_message(db_path: str, msg_data: dict):
+def save_message(db_path: str, peer: str, msg_data: dict):
     now = datetime.utcnow().isoformat()
     with get_conn(db_path) as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO messages
-                (message_id, date, text, media_type, media_path, media_status, from_id,
+                (peer, message_id, date, text, media_type, media_path, media_status, from_id,
                  reply_to_msg_id, is_link_resolved, resolved_from_url, raw_json, downloaded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                peer,
                 msg_data["message_id"],
                 msg_data.get("date"),
                 msg_data.get("text"),
@@ -314,18 +418,19 @@ def save_message(db_path: str, msg_data: dict):
 
 
 
-def save_message_and_advance(db_path: str, msg_data: dict, message_id: int):
-    """Save message and advance the resume cursor in a single transaction."""
+def save_message_and_advance(db_path: str, peer: str, msg_data: dict, message_id: int):
+    """Save message and advance the dialog's resume cursor in a single transaction."""
     now = datetime.utcnow().isoformat()
     with get_conn(db_path) as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO messages
-                (message_id, date, text, media_type, media_path, media_status, from_id,
+                (peer, message_id, date, text, media_type, media_path, media_status, from_id,
                  reply_to_msg_id, is_link_resolved, resolved_from_url, raw_json, downloaded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                peer,
                 msg_data["message_id"],
                 msg_data.get("date"),
                 msg_data.get("text"),
@@ -342,7 +447,7 @@ def save_message_and_advance(db_path: str, msg_data: dict, message_id: int):
         )
         conn.execute(
             "INSERT OR REPLACE INTO download_state (key, value) VALUES (?, ?)",
-            ("last_saved_message_id", str(message_id)),
+            (cursor_key(peer), str(message_id)),
         )
         _upsert_media_index(
             conn,
@@ -351,17 +456,24 @@ def save_message_and_advance(db_path: str, msg_data: dict, message_id: int):
         )
 
 
-def save_resolved_message(db_path: str, source_message_id: int, peer: str, msg_data: dict):
+def save_resolved_message(
+    db_path: str,
+    dialog_peer: str,
+    source_message_id: int,
+    peer: str,
+    msg_data: dict,
+):
     now = datetime.utcnow().isoformat()
     with get_conn(db_path) as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO resolved_messages
-                (source_message_id, peer, message_id, date, text, media_type,
+                (dialog_peer, source_message_id, peer, message_id, date, text, media_type,
                  media_path, media_status, raw_json, downloaded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                dialog_peer,
                 source_message_id,
                 peer,
                 msg_data["message_id"],
@@ -392,19 +504,22 @@ def save_resolved_message(db_path: str, source_message_id: int, peer: str, msg_d
 
 def set_message_media(
     db_path: str,
+    peer: str,
     message_id: int,
     media_path: str | None,
     media_status: str | None,
 ):
     with get_conn(db_path) as conn:
         conn.execute(
-            "UPDATE messages SET media_path = ?, media_status = ? WHERE message_id = ?",
-            (media_path, media_status, message_id),
+            "UPDATE messages SET media_path = ?, media_status = ? "
+            "WHERE peer = ? AND message_id = ?",
+            (media_path, media_status, peer, message_id),
         )
 
 
 def set_resolved_media(
     db_path: str,
+    dialog_peer: str,
     source_message_id: int,
     peer: str,
     message_id: int,
@@ -414,16 +529,16 @@ def set_resolved_media(
     with get_conn(db_path) as conn:
         conn.execute(
             "UPDATE resolved_messages SET media_path = ?, media_status = ? "
-            "WHERE source_message_id = ? AND peer = ? AND message_id = ?",
-            (media_path, media_status, source_message_id, str(peer), message_id),
+            "WHERE dialog_peer = ? AND source_message_id = ? AND peer = ? AND message_id = ?",
+            (media_path, media_status, dialog_peer, source_message_id, str(peer), message_id),
         )
 
 
-def set_link_resolved(db_path: str, message_id: int, resolved: bool):
+def set_link_resolved(db_path: str, peer: str, message_id: int, resolved: bool):
     with get_conn(db_path) as conn:
         conn.execute(
-            "UPDATE messages SET is_link_resolved = ? WHERE message_id = ?",
-            (int(resolved), message_id),
+            "UPDATE messages SET is_link_resolved = ? WHERE peer = ? AND message_id = ?",
+            (int(resolved), peer, message_id),
         )
 
 
@@ -438,62 +553,78 @@ def _needs_media_clause() -> str:
     )
 
 
-def get_pending_media(db_path: str) -> list:
-    """Saved Messages rows whose media still needs downloading."""
+def get_pending_media(db_path: str, peer: str) -> list:
+    """One dialog's rows whose media still needs downloading."""
     with get_conn(db_path) as conn:
         return conn.execute(
-            f"SELECT message_id, media_type FROM messages WHERE {_needs_media_clause()} "
-            "ORDER BY message_id"
+            f"SELECT message_id, media_type FROM messages "
+            f"WHERE peer = ? AND {_needs_media_clause()} "
+            "ORDER BY message_id",
+            (peer,),
         ).fetchall()
 
 
-def get_pending_resolved_media(db_path: str) -> list:
-    """Linked-message rows whose media still needs downloading."""
+def get_pending_resolved_media(db_path: str, dialog_peer: str) -> list:
+    """One dialog's linked-message rows whose media still needs downloading."""
     with get_conn(db_path) as conn:
         return conn.execute(
             f"SELECT source_message_id, peer, message_id, media_type "
-            f"FROM resolved_messages WHERE {_needs_media_clause()} "
-            "ORDER BY source_message_id, peer, message_id"
+            f"FROM resolved_messages WHERE dialog_peer = ? AND {_needs_media_clause()} "
+            "ORDER BY source_message_id, peer, message_id",
+            (dialog_peer,),
         ).fetchall()
 
 
-def get_unresolved_links(db_path: str) -> list:
-    """Saved Messages rows flagged unresolved that mention a t.me link."""
+def get_unresolved_links(db_path: str, peer: str) -> list:
+    """One dialog's rows flagged unresolved that mention a t.me link."""
     with get_conn(db_path) as conn:
         return conn.execute(
             "SELECT message_id, text FROM messages "
-            "WHERE is_link_resolved = 0 AND text LIKE '%t.me/%' "
-            "ORDER BY message_id"
+            "WHERE peer = ? AND is_link_resolved = 0 AND text LIKE '%t.me/%' "
+            "ORDER BY message_id",
+            (peer,),
         ).fetchall()
 
 
-def get_stats(db_path: str) -> dict:
+def get_stats(db_path: str, peer: str) -> dict:
+    """Statistics scoped to one dialog (peer key)."""
     with get_conn(db_path) as conn:
-        total = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        total = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE peer = ?", (peer,)
+        ).fetchone()[0]
         with_media = conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE media_path IS NOT NULL"
+            "SELECT COUNT(*) FROM messages WHERE peer = ? AND media_path IS NOT NULL",
+            (peer,),
         ).fetchone()[0]
         resolved = conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE is_link_resolved = 1"
+            "SELECT COUNT(*) FROM messages WHERE peer = ? AND is_link_resolved = 1",
+            (peer,),
         ).fetchone()[0]
         resolved_msgs = conn.execute(
-            "SELECT COUNT(*) FROM resolved_messages"
+            "SELECT COUNT(*) FROM resolved_messages WHERE dialog_peer = ?", (peer,)
         ).fetchone()[0]
         failed_media = conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE media_status LIKE 'failed%'"
+            "SELECT COUNT(*) FROM messages WHERE peer = ? AND media_status LIKE 'failed%'",
+            (peer,),
         ).fetchone()[0]
         failed_media += conn.execute(
-            "SELECT COUNT(*) FROM resolved_messages WHERE media_status LIKE 'failed%'"
+            "SELECT COUNT(*) FROM resolved_messages "
+            "WHERE dialog_peer = ? AND media_status LIKE 'failed%'",
+            (peer,),
         ).fetchone()[0]
         pending_media = conn.execute(
-            f"SELECT COUNT(*) FROM messages WHERE {_needs_media_clause()}"
+            f"SELECT COUNT(*) FROM messages WHERE peer = ? AND {_needs_media_clause()}",
+            (peer,),
         ).fetchone()[0]
         pending_media += conn.execute(
-            f"SELECT COUNT(*) FROM resolved_messages WHERE {_needs_media_clause()}"
+            f"SELECT COUNT(*) FROM resolved_messages "
+            f"WHERE dialog_peer = ? AND {_needs_media_clause()}",
+            (peer,),
         ).fetchone()[0]
         unresolved_links = conn.execute(
             "SELECT COUNT(*) FROM messages "
-            "WHERE is_link_resolved = 0 AND text LIKE '%t.me/%'"
+            "WHERE peer = ? AND is_link_resolved = 0 AND text LIKE '%t.me/%'",
+            (peer,),
         ).fetchone()[0]
     return {
         "total_messages": total,

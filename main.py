@@ -1,15 +1,49 @@
 #!/usr/bin/env python3
-"""tg-down — Telegram Saved Messages downloader."""
+"""tg-down — Telegram dialog archiver.
+
+Lists all dialogs, lets the user fuzzy-search and pick one with
+Up/Down + Enter, then downloads that dialog's full history and media.
+"""
 
 import asyncio
 import argparse
 
+from telethon.errors import AuthKeyDuplicatedError
+
 from utils import load_config, check_disk_space, free_space_gb, wait_for_disk_space
-from downloader import run_download
+from downloader import _build_client, _reauthorize_client, make_target, run_download
+from picker import entity_name, pick_dialog
+
+
+async def _select_target(client, peer_arg):
+    """Resolve the download target: --peer value or interactive picker."""
+    if peer_arg:
+        if peer_arg.strip().lower() == "me":
+            return make_target("me")
+        entity = await client.get_entity(peer_arg)
+        return make_target(entity, name=entity_name(entity))
+    dialogs = await client.get_dialogs()
+    chosen = await pick_dialog(dialogs)
+    if chosen is None:
+        return None
+    return make_target(chosen.entity, name=chosen.name)
+
+
+async def _connect_and_select(cfg, peer_arg):
+    """Short-lived client just for target selection (closed afterwards)."""
+    client = _build_client(cfg)
+    try:
+        await client.start()
+    except AuthKeyDuplicatedError:
+        client = await _reauthorize_client(client, cfg, startup=True)
+    try:
+        return await _select_target(client, peer_arg)
+    finally:
+        await client.disconnect()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Download Telegram Saved Messages and media.")
+    parser = argparse.ArgumentParser(description="Download a Telegram dialog's full history and media.")
     parser.add_argument(
         "--full-scan",
         action="store_true",
@@ -19,6 +53,11 @@ def main():
         "--env",
         default=".env",
         help="Path to the environment config file (default: .env).",
+    )
+    parser.add_argument(
+        "--peer",
+        default=None,
+        help="Skip the picker: username, phone, numeric ID, or 'me' for Saved Messages.",
     )
     args = parser.parse_args()
 
@@ -39,7 +78,17 @@ def main():
     print(f"[OK]    {free_space_gb(media_dir):.1f} GB free on '{media_dir}'.")
 
     try:
-        asyncio.run(run_download(cfg, full_scan=args.full_scan))
+        target = asyncio.run(_connect_and_select(cfg, args.peer))
+    except KeyboardInterrupt:
+        print("\n[INFO] Aborted by user.")
+        return
+    if target is None:
+        print("[INFO] No dialog selected, exiting.")
+        return
+    print(f"[PICK] Selected: {target.label} [{target.key}]")
+
+    try:
+        asyncio.run(run_download(cfg, target, full_scan=args.full_scan))
     except KeyboardInterrupt:
         print("\n[INFO] Aborted by user.")
 

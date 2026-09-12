@@ -5,8 +5,8 @@ Run this after moving files to a new location so tg-down
 knows where they are and won't re-download them.
 
 Usage:
-    python3 rescan.py [--env .env]                  # scan all paths in .env
-    python3 rescan.py /path/to/media                # scan a specific directory
+    python3 rescan.py [--env .env] [--peer me]                  # scan all paths in .env
+    python3 rescan.py [--peer user:123] /path/to/media          # scan a specific directory
 """
 
 import sys
@@ -18,8 +18,9 @@ from utils import load_config
 import db
 
 
-def rescan(db_path: str, scan_dirs: list[str]):
-    print(f"[RESCAN] Scanning {len(scan_dirs)} director{'y' if len(scan_dirs)==1 else 'ies'} …")
+def rescan(db_path: str, scan_dirs: list[str], peer: str = "me"):
+    print(f"[RESCAN] Scanning {len(scan_dirs)} director{'y' if len(scan_dirs)==1 else 'ies'} "
+          f"for peer '{peer}' …")
 
     # Build index: message_id (int) -> list of found paths
     found: dict[int, list[Path]] = {}
@@ -31,6 +32,14 @@ def rescan(db_path: str, scan_dirs: list[str]):
             continue
         for f in d.rglob("*"):
             if f.is_file() and f.suffix != ".tmp":
+                # Saved Messages ('me') uses the legacy top-level layout;
+                # other dialogs live under dialogs/<label>/ — never mix them,
+                # or identical numeric IDs would remap to the wrong dialog.
+                in_ns = "dialogs" in f.parts
+                if peer == "me" and in_ns:
+                    continue
+                if peer != "me" and not in_ns:
+                    continue
                 # Filename starts with message_id: "123456_name.ext" or "123456.ext"
                 stem = f.stem.split("_")[0]
                 if stem.isdigit():
@@ -60,15 +69,16 @@ def rescan(db_path: str, scan_dirs: list[str]):
             return str(p)
 
         rows = conn.execute(
-            "SELECT id, media_path FROM messages WHERE message_id = ?", (msg_id,)
+            "SELECT id, media_path FROM messages WHERE peer = ? AND message_id = ?",
+            (peer, msg_id,),
         ).fetchall()
         table = "messages"
         if not rows:
             # resolved message IDs repeat across chats — handle every row.
             rows = conn.execute(
                 "SELECT id, source_message_id, peer, message_id, media_path"
-                " FROM resolved_messages WHERE message_id = ?",
-                (msg_id,),
+                " FROM resolved_messages WHERE dialog_peer = ? AND message_id = ?",
+                (peer, msg_id,),
             ).fetchall()
             table = "resolved_messages"
 
@@ -111,12 +121,21 @@ def rescan(db_path: str, scan_dirs: list[str]):
 if __name__ == "__main__":
     argv = sys.argv[1:]
     env_path = ".env"
+    peer = "me"
     if "--env" in argv:
         i = argv.index("--env")
         try:
             env_path = argv[i + 1]
         except IndexError:
             print("[ERROR] --env requires a path argument.")
+            sys.exit(1)
+        del argv[i:i + 2]
+    if "--peer" in argv:
+        i = argv.index("--peer")
+        try:
+            peer = argv[i + 1]
+        except IndexError:
+            print("[ERROR] --peer requires a peer key (e.g. me, user:123, channel:456).")
             sys.exit(1)
         del argv[i:i + 2]
 
@@ -130,4 +149,4 @@ if __name__ == "__main__":
         # Scan media_dir + any extra search_paths from config
         scan_dirs = [cfg["media_dir"]] + cfg.get("search_paths", [])
 
-    rescan(db_path, scan_dirs)
+    rescan(db_path, scan_dirs, peer)

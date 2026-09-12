@@ -1,15 +1,19 @@
 # tg-down
 
-Download your Telegram **Saved Messages** (`me`) to a local SQLite database and media directory.
+Pick any Telegram dialog (users, groups, channels, Saved Messages) from an
+interactive list and download its full history and media to a local SQLite
+database and media directory.
 
 ## Features
 
-- Saves all messages (text, media metadata) to SQLite
+- Interactive dialog picker: live keyword search, `↑`/`↓` to move, `Enter` to confirm, `Esc` to cancel (prompt_toolkit)
+- Saves all messages (text, media metadata) of the selected dialog to SQLite
 - Downloads media files (photos, videos, documents, audio, voice, stickers, animations)
 - Resolves `t.me/…` links — fetches and saves the *linked* message content
 - Expands linked album/grouped messages so every photo/video in the group is saved
 - Reuses already-downloaded media when the same Telegram file appears again in forwards, repeats, or full scans
-- Starts from the **oldest** message; fully resumable if interrupted
+- Starts from the **oldest** message; fully resumable if interrupted (resume cursor is stored per dialog)
+- One shared database for all dialogs, namespaced by peer (`me`, `user:<id>`, `chat:<id>`, `channel:<id>`); old Saved-Messages-only databases migrate automatically
 - Repair pass on every run: previously failed media downloads and link resolutions are retried automatically — no file is ever silently skipped (`media_status` tracks `failed:*` / `skipped:*` / `gone` per row)
 - Optional full-history scan mode to backfill missed messages without clearing old data
 - Guards free disk space (configurable minimum) before and during download: when space runs low it pauses and rechecks every minute, resuming automatically once space is freed
@@ -35,13 +39,24 @@ API_HASH=your_api_hash_here
 ## Usage
 
 ```bash
-.venv/bin/python main.py [--env .env] [--full-scan]
+.venv/bin/python main.py [--env .env] [--peer @someone] [--full-scan]
 ```
 
-To re-scan the entire Saved Messages history and backfill anything missing from the database:
+Without `--peer`, startup shows the dialog picker: type to filter by name,
+username or ID, move with `↑`/`↓`, confirm with `Enter`, cancel with `Esc`.
+With `--peer` (username, phone, numeric ID, or `me`) the picker is skipped —
+useful for scripts and cron jobs.
+
+To re-scan the selected dialog's entire history and backfill anything missing:
 
 ```bash
-.venv/bin/python main.py --full-scan
+.venv/bin/python main.py --peer @someone --full-scan
+```
+
+To re-index files you moved on disk (scoped to one dialog, `me` by default):
+
+```bash
+.venv/bin/python rescan.py [--peer user:123] [/path/to/media]
 ```
 
 The first run will ask for your phone number and a Telegram login code (standard MTProto auth). The session is saved locally so subsequent runs skip authentication. If Telegram invalidates that session because it was used from multiple IP addresses, the tool clears the broken session and asks you to log in again.
@@ -72,18 +87,19 @@ Real environment variables override values in the `.env` file, so secrets can al
 
 ## Database schema
 
-**`messages`** — one row per Saved Message (`media_status`: NULL = ok, `failed:*` = retried next run, `skipped:*` = intentionally skipped, `gone` = deleted upstream)  
+**`messages`** — one row per dialog message, namespaced by `peer` (`media_status`: NULL = ok, `failed:*` = retried next run, `skipped:*` = intentionally skipped, `gone` = deleted upstream)  
 **`resolved_messages`** — content fetched by following `t.me` links  
-**`download_state`** — stores resume cursor (`last_saved_message_id`)  
+**`download_state`** — stores per-dialog resume cursors (`cursor:<peer>`)  
 **`media_index`** — media fingerprint → path dedup index
 
 ## Media directory layout
 
 ```
 media/
-  photo/2024/05/123456789.jpg
+  photo/2024/05/123456789.jpg                          # Saved Messages (legacy flat layout)
   video/2024/05/987654321.mp4
-  document/2024/06/111111111.pdf
-  resolved/<peer>/photo/2024/05/222222222.jpg   # media of t.me-linked messages, namespaced per chat
+  resolved/<peer>/photo/2024/05/222222222.jpg          # t.me-linked media (Saved Messages)
+  dialogs/<name>_<key>/photo/2024/05/333333333.jpg     # other dialogs, namespaced per chat
+  dialogs/<name>_<key>/resolved/<peer>/...             # their linked media
   ...
 ```

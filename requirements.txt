@@ -3,3 +3,4 @@ cryptg
 PySocks
 python-socks[asyncio]
 python-dotenv>=1.0.0
+prompt_toolkit>=3.0.0

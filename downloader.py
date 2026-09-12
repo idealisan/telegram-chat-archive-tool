@@ -6,18 +6,56 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from telethon import TelegramClient
 from telethon.errors import AuthKeyDuplicatedError, FloodWaitError
 from telethon.tl.types import (
+    Channel,
+    Chat,
     Message,
     MessageMediaDocument,
     MessageMediaPhoto,
     MessageService,
+    User,
 )
 
 import db
 import utils
+
+
+# ---------------------------------------------------------------------------
+# Dialog target: everything the pipeline needs for the selected conversation.
+# - ref:       entity (or "me") passed to Telethon calls
+# - key:       stable DB/cursor key: 'me' | 'user:1' | 'chat:2' | 'channel:3'
+# - label:     human-readable dialog name for logs
+# - namespace: media-dir segment; None for Saved Messages (legacy layout),
+#              'dialogs/<label>_<key>' for everything else
+# ---------------------------------------------------------------------------
+
+def peer_key_of(entity) -> str:
+    """Stable per-dialog key. Saved Messages (self) is always 'me'."""
+    if entity == "me" or getattr(entity, "is_self", False):
+        return "me"
+    eid = getattr(entity, "id", "?")
+    if isinstance(entity, User):
+        return f"user:{eid}"
+    if isinstance(entity, Channel):
+        return f"channel:{eid}"
+    if isinstance(entity, Chat):
+        return f"chat:{eid}"
+    return f"id:{eid}"
+
+
+def make_target(ref, name: str | None = None) -> SimpleNamespace:
+    """Bundle ref + key + label + media namespace for one dialog."""
+    key = peer_key_of(ref)
+    label = name or ("Saved Messages" if key == "me" else key)
+    namespace = None
+    if key != "me":
+        seg = utils.safe_filename(f"{label}_{key}", max_len=64).replace(":", "-")
+        namespace = f"dialogs/{seg or key.replace(':', '-')}"
+    return SimpleNamespace(ref=ref, key=key, label=label, namespace=namespace)
 
 
 # Network-level exceptions worth retrying
@@ -264,6 +302,7 @@ def _get_existing_media_path(
     media_dir: str,
     cfg: dict,
     message,
+    peer: str,
     *,
     skip_missing: bool,
     allow_same_id: bool = True,
@@ -275,7 +314,7 @@ def _get_existing_media_path(
     would be a different file entirely. Fingerprint matching is still allowed.
     """
     existing_path = (
-        db.get_media_path(db_path, message.id) if allow_same_id else None
+        db.get_media_path(db_path, peer, message.id) if allow_same_id else None
     )
     if not existing_path:
         existing_path = db.find_media_path_by_fingerprint(
@@ -396,6 +435,7 @@ async def _download_media(
     cfg: dict,
     *,
     subfolder: str | None = None,
+    namespace: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Download message media; return (relative path, media_status).
 
@@ -403,9 +443,11 @@ async def _download_media(
     skips, or 'failed:<reason>' when the download was attempted but failed
     (the repair pass retries those — nothing is ever silently dropped).
 
-    *subfolder* namespaces files that don't belong to Saved Messages itself
+    *subfolder* namespaces files that don't belong to the dialog itself
     (e.g. ``resolved/<peer>`` for t.me-linked content) so identical numeric
     message IDs from different chats can never overwrite each other.
+    *namespace* (``dialogs/<label>``) isolates non-Saved-Messages dialogs;
+    None keeps the legacy Saved-Messages layout.
     """
     media_type = _get_media_type(message)
     if not media_type or media_type == "webpage":
@@ -429,7 +471,10 @@ async def _download_media(
             return None, "skipped:size"
 
     date_str = message.date.strftime("%Y/%m") if message.date else "unknown"
-    base_dir = Path(media_dir) / (subfolder or media_type)
+    base_dir = Path(media_dir)
+    if namespace:
+        base_dir = base_dir / namespace
+    base_dir = base_dir / (subfolder or media_type)
     dest_dir = base_dir / date_str
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -492,7 +537,8 @@ async def _download_media(
                     print(f"    [FOUND] Located in search path: {candidate}")
                     return _store_path(candidate), None
         # Also try exact filename match without name hint
-        candidate = Path(search_dir) / (subfolder or media_type) / date_str / filename
+        ns_base = Path(search_dir) / namespace if namespace else Path(search_dir)
+        candidate = ns_base / (subfolder or media_type) / date_str / filename
         if candidate.is_file():
             if known_size is None or candidate.stat().st_size == known_size:
                 print(f"    [FOUND] Located in search path: {candidate}")
@@ -554,6 +600,7 @@ async def _download_media(
 
 async def resolve_and_save(
     client,
+    target,
     source_message_id: int,
     link_info: dict,
     cfg: dict,
@@ -599,6 +646,7 @@ async def resolve_and_save(
                     media_dir,
                     cfg,
                     linked_member,
+                    target.key,
                     skip_missing=cfg.get("skip_missing_media", False),
                     allow_same_id=False,
                 )
@@ -607,7 +655,8 @@ async def resolve_and_save(
                     data["media_status"] = None
                 else:
                     path, status = await _download_media(
-                        client, linked_member, media_dir, cfg, subfolder=subfolder
+                        client, linked_member, media_dir, cfg,
+                        subfolder=subfolder, namespace=target.namespace,
                     )
                     data["media_path"] = path
                     data["media_status"] = status
@@ -622,7 +671,7 @@ async def resolve_and_save(
                 else:
                     data["media_status"] = None
 
-            db.save_resolved_message(db_path, source_message_id, str(peer), data)
+            db.save_resolved_message(db_path, target.key, source_message_id, str(peer), data)
 
         if len(linked_messages) > 1:
             print(
@@ -655,7 +704,7 @@ def _coerce_peer(peer: str):
     return s
 
 
-async def repair_incomplete(client, cfg: dict) -> dict:
+async def repair_incomplete(client, target, cfg: dict) -> dict:
     """Retry previously failed media downloads and link resolutions.
 
     Runs at startup so no file is ever silently skipped: rows marked
@@ -677,34 +726,37 @@ async def repair_incomplete(client, cfg: dict) -> dict:
 
     async def _redownload(message, *, subfolder, allow_same_id):
         existing = _get_existing_media_path(
-            db_path, media_dir, cfg, message,
+            db_path, media_dir, cfg, message, target.key,
             skip_missing=cfg.get("skip_missing_media", False),
             allow_same_id=allow_same_id,
         )
         if existing:
             return existing, None
-        return await _download_media(client, message, media_dir, cfg, subfolder=subfolder)
+        return await _download_media(
+            client, message, media_dir, cfg,
+            subfolder=subfolder, namespace=target.namespace,
+        )
 
-    # --- 1. Failed Saved-Messages media ---
+    # --- 1. Failed dialog media ---
     if cfg.get("download_media"):
-        pending = db.get_pending_media(db_path)
+        pending = db.get_pending_media(db_path, target.key)
         if pending:
             print(f"[REPAIR] Retrying {len(pending)} incomplete media download(s) …")
         for row in pending:
             msg_id = row["message_id"]
             try:
-                fetched = _single(await client.get_messages("me", ids=msg_id))
+                fetched = _single(await client.get_messages(target.ref, ids=msg_id))
                 if fetched is None:
-                    db.set_message_media(db_path, msg_id, None, "gone")
+                    db.set_message_media(db_path, target.key, msg_id, None, "gone")
                     print(f"  [REPAIR] msg {msg_id}: source deleted, marked gone.")
                     continue
                 await _wait_for_disk_space(media_dir, min_gb)
                 media_type = _get_media_type(fetched)
                 if not media_type or media_type == "webpage" or media_type not in allowed:
-                    db.set_message_media(db_path, msg_id, None, "skipped:type")
+                    db.set_message_media(db_path, target.key, msg_id, None, "skipped:type")
                     continue
                 path, status = await _redownload(fetched, subfolder=None, allow_same_id=True)
-                db.set_message_media(db_path, msg_id, path, status)
+                db.set_message_media(db_path, target.key, msg_id, path, status)
                 if path:
                     counts["media_repaired"] += 1
                     print(f"  [REPAIR] msg {msg_id}: recovered → {path}")
@@ -724,7 +776,7 @@ async def repair_incomplete(client, cfg: dict) -> dict:
             await asyncio.sleep(delay)
 
         # --- 2. Failed linked-message media ---
-        pending_res = db.get_pending_resolved_media(db_path)
+        pending_res = db.get_pending_resolved_media(db_path, target.key)
         if pending_res:
             print(f"[REPAIR] Retrying {len(pending_res)} incomplete linked media download(s) …")
         for row in pending_res:
@@ -732,18 +784,18 @@ async def repair_incomplete(client, cfg: dict) -> dict:
             try:
                 fetched = _single(await client.get_messages(_coerce_peer(peer_raw), ids=mid))
                 if fetched is None:
-                    db.set_resolved_media(db_path, src, peer_raw, mid, None, "gone")
+                    db.set_resolved_media(db_path, target.key, src, peer_raw, mid, None, "gone")
                     continue
                 await _wait_for_disk_space(media_dir, min_gb)
                 media_type = _get_media_type(fetched)
                 if not media_type or media_type == "webpage" or media_type not in allowed:
-                    db.set_resolved_media(db_path, src, peer_raw, mid, None, "skipped:type")
+                    db.set_resolved_media(db_path, target.key, src, peer_raw, mid, None, "skipped:type")
                     continue
                 peer_label = utils.safe_filename(str(peer_raw), max_len=48) or "unknown"
                 path, status = await _redownload(
                     fetched, subfolder=f"resolved/{peer_label}", allow_same_id=False
                 )
-                db.set_resolved_media(db_path, src, peer_raw, mid, path, status)
+                db.set_resolved_media(db_path, target.key, src, peer_raw, mid, path, status)
                 if path:
                     counts["media_repaired"] += 1
                 elif (status or "").startswith("failed"):
@@ -763,7 +815,7 @@ async def repair_incomplete(client, cfg: dict) -> dict:
 
     # --- 3. Previously unresolved t.me links ---
     if cfg.get("resolve_tme_links"):
-        pending_links = db.get_unresolved_links(db_path)
+        pending_links = db.get_unresolved_links(db_path, target.key)
         if pending_links:
             print(f"[REPAIR] Re-resolving {len(pending_links)} unresolved link message(s) …")
         for row in pending_links:
@@ -771,13 +823,13 @@ async def repair_incomplete(client, cfg: dict) -> dict:
                 links = utils.extract_tme_links(row["text"] or "")
                 if not links:
                     # Mentions t.me but nothing resolvable (e.g. invite link).
-                    db.set_link_resolved(db_path, row["message_id"], True)
+                    db.set_link_resolved(db_path, target.key, row["message_id"], True)
                     continue
                 ok = True
                 for info in links:
-                    ok = await resolve_and_save(client, row["message_id"], info, cfg) and ok
+                    ok = await resolve_and_save(client, target, row["message_id"], info, cfg) and ok
                     await asyncio.sleep(delay)
-                db.set_link_resolved(db_path, row["message_id"], ok)
+                db.set_link_resolved(db_path, target.key, row["message_id"], ok)
                 if ok:
                     counts["links_repaired"] += 1
                 else:
@@ -798,12 +850,19 @@ async def repair_incomplete(client, cfg: dict) -> dict:
     return counts
 
 
-async def run_download(cfg: dict, *, full_scan: bool = False):
+async def run_download(cfg: dict, target, *, full_scan: bool = False):
+    """Download one dialog's full history + media into the shared DB.
+
+    *target* is a make_target() bundle (ref/key/label/namespace) for the
+    selected conversation. Saved Messages uses key 'me' and the legacy
+    media layout; every other dialog is namespaced under dialogs/<label>.
+    """
     db_path = cfg["db_path"]
     media_dir = cfg["media_dir"]
     delay = cfg["request_delay_seconds"]
     min_gb = cfg["min_free_space_gb"]
     search_paths = cfg.get("search_paths", [])
+    cursor = db.cursor_key(target.key)
 
     db.init_db(db_path)
     Path(media_dir).mkdir(parents=True, exist_ok=True)
@@ -815,9 +874,10 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
     except AuthKeyDuplicatedError:
         client = await _reauthorize_client(client, cfg, startup=True)
     print("[INFO] Connected to Telegram.")
+    print(f"[INFO] Target dialog: {target.label} [{target.key}]")
 
     # --- Check for files moved/deleted off disk ---
-    missing_count = db.get_missing_media_count(db_path, media_dir, search_paths)
+    missing_count = db.get_missing_media_count(db_path, media_dir, search_paths, peer=target.key)
     skip_missing = cfg.get("skip_missing_media", False)
     if missing_count and not skip_missing:
         print(
@@ -836,7 +896,7 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
     repair_counts = {"media_repaired": 0, "media_failed": 0, "links_repaired": 0, "links_failed": 0}
     total = 0
     reconnect_attempt = 0
-    persisted_resume_id = int(db.get_state(db_path, "last_saved_message_id", 0) or 0)
+    persisted_resume_id = int(db.get_state(db_path, cursor, 0) or 0)
     session_resume_id = 0 if full_scan else persisted_resume_id
     highest_seen_id = persisted_resume_id
     full_scan_completed = False
@@ -844,12 +904,12 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
         # --- Repair pass: retry anything a previous run failed to fetch ---
         # (inside the outer try so Ctrl+C here still prints the summary and disconnects)
         try:
-            repair_counts = await repair_incomplete(client, cfg)
+            repair_counts = await repair_incomplete(client, target, cfg)
         except AuthKeyDuplicatedError:
             print()
             client = await _reauthorize_client(client, cfg, startup=False)
             print("[INFO] Connected to Telegram.")
-            repair_counts = await repair_incomplete(client, cfg)
+            repair_counts = await repair_incomplete(client, target, cfg)
         if repair_counts["media_repaired"] or repair_counts["links_repaired"]:
             print(
                 f"[REPAIR] Recovered {repair_counts['media_repaired']} media file(s), "
@@ -865,20 +925,20 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
 
                 # Read fresh resume cursor (updated after every message)
                 min_id = session_resume_id if full_scan else int(
-                    db.get_state(db_path, "last_saved_message_id", 0) or 0
+                    db.get_state(db_path, cursor, 0) or 0
                 )
                 if full_scan:
                     if min_id:
-                        print(f"[INFO] Full scan resuming in-memory from message ID > {min_id}")
+                        print(f"[INFO] Full scan of '{target.label}' resuming in-memory from message ID > {min_id}")
                     else:
-                        print("[INFO] Full scan enabled — scanning from the oldest message.")
+                        print(f"[INFO] Full scan enabled — scanning '{target.label}' from the oldest message.")
                 elif min_id:
-                    print(f"[INFO] Resuming from message ID > {min_id}")
+                    print(f"[INFO] Resuming '{target.label}' from message ID > {min_id}")
                 else:
-                    print("[INFO] Starting from the oldest message.")
+                    print(f"[INFO] Starting '{target.label}' from the oldest message.")
 
                 async for message in client.iter_messages(
-                    "me",
+                    target.ref,
                     reverse=True,
                     min_id=min_id,
                     limit=None,
@@ -907,7 +967,7 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
                         if full_scan:
                             session_resume_id = message.id
                         else:
-                            db.set_state(db_path, "last_saved_message_id", str(message.id))
+                            db.set_state(db_path, cursor, str(message.id))
                         continue
 
                     highest_seen_id = max(highest_seen_id, message.id)
@@ -931,13 +991,17 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
                             media_dir,
                             cfg,
                             message,
+                            target.key,
                             skip_missing=skip_missing,
                         )
                         if existing_path:
                             data["media_path"] = existing_path
                             data["media_status"] = None
                         else:
-                            path, status = await _download_media(client, message, media_dir, cfg)
+                            path, status = await _download_media(
+                                client, message, media_dir, cfg,
+                                namespace=target.namespace,
+                            )
                             data["media_path"] = path
                             data["media_status"] = status
                     else:
@@ -956,7 +1020,7 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
                     if tme_links:
                         links_ok = True
                         for link_info in tme_links:
-                            ok = await resolve_and_save(client, message.id, link_info, cfg)
+                            ok = await resolve_and_save(client, target, message.id, link_info, cfg)
                             links_ok = links_ok and ok
                             await asyncio.sleep(delay)
                         # Only mark resolved when every link actually succeeded;
@@ -964,17 +1028,17 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
                         data["is_link_resolved"] = links_ok
 
                     if full_scan:
-                        db.save_message(db_path, data)
+                        db.save_message(db_path, target.key, data)
                         session_resume_id = message.id
                     else:
-                        db.save_message_and_advance(db_path, data, message.id)
+                        db.save_message_and_advance(db_path, target.key, data, message.id)
                     total += 1
                     reconnect_attempt = 0  # reset backoff on any success
                     await asyncio.sleep(delay)
 
                 # iter_messages exhausted — all messages downloaded
                 if full_scan:
-                    db.set_state(db_path, "last_saved_message_id", str(highest_seen_id))
+                    db.set_state(db_path, cursor, str(highest_seen_id))
                     full_scan_completed = True
                 break
 
@@ -1022,9 +1086,9 @@ async def run_download(cfg: dict, *, full_scan: bool = False):
                 "\n[INFO] Full scan interrupted before completion. "
                 "Existing resume cursor was left unchanged."
             )
-        stats = db.get_stats(db_path)
+        stats = db.get_stats(db_path, target.key)
         print(
-            f"\n[DONE] Session summary:\n"
+            f"\n[DONE] Session summary for '{target.label}' [{target.key}]:\n"
             f"  Messages in DB   : {stats['total_messages']}\n"
             f"  With media       : {stats['with_media']}\n"
             f"  Links resolved   : {stats['link_resolved']}\n"
