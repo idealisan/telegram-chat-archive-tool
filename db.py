@@ -226,18 +226,24 @@ def get_missing_media_count(
     media_dir: str,
     search_paths: list[str] | None = None,
     peer: str | None = None,
+    include_resolved: bool = True,
 ) -> int:
     """Count DB records that have a media_path but the file no longer exists on disk."""
     with get_conn(db_path) as conn:
         if peer is None:
-            rows = conn.execute(
-                """
-                SELECT media_path FROM messages WHERE media_path IS NOT NULL
-                UNION ALL
-                SELECT media_path FROM resolved_messages WHERE media_path IS NOT NULL
-                """
-            ).fetchall()
-        else:
+            if include_resolved:
+                rows = conn.execute(
+                    """
+                    SELECT media_path FROM messages WHERE media_path IS NOT NULL
+                    UNION ALL
+                    SELECT media_path FROM resolved_messages WHERE media_path IS NOT NULL
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT media_path FROM messages WHERE media_path IS NOT NULL"
+                ).fetchall()
+        elif include_resolved:
             rows = conn.execute(
                 """
                 SELECT media_path FROM messages WHERE peer = ? AND media_path IS NOT NULL
@@ -245,6 +251,11 @@ def get_missing_media_count(
                 SELECT media_path FROM resolved_messages WHERE dialog_peer = ? AND media_path IS NOT NULL
                 """,
                 (peer, peer),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT media_path FROM messages WHERE peer = ? AND media_path IS NOT NULL",
+                (peer,),
             ).fetchall()
     return sum(
         1
@@ -384,9 +395,39 @@ def set_media_path_by_rowid(
         _upsert_media_index(conn, fingerprint, media_path)
 
 
-def save_message(db_path: str, peer: str, msg_data: dict):
+def _link_fields_for_save(
+    conn,
+    peer: str,
+    message_id: int,
+    msg_data: dict,
+    preserve_link_state: bool,
+) -> tuple[int, str | None]:
+    if preserve_link_state:
+        row = conn.execute(
+            "SELECT is_link_resolved, resolved_from_url FROM messages "
+            "WHERE peer = ? AND message_id = ?",
+            (peer, message_id),
+        ).fetchone()
+        if row is not None:
+            return int(row["is_link_resolved"] or 0), row["resolved_from_url"]
+    return (
+        int(msg_data.get("is_link_resolved") or 0),
+        msg_data.get("resolved_from_url"),
+    )
+
+
+def save_message(
+    db_path: str,
+    peer: str,
+    msg_data: dict,
+    *,
+    preserve_link_state: bool = False,
+):
     now = datetime.utcnow().isoformat()
     with get_conn(db_path) as conn:
+        link_resolved, resolved_from_url = _link_fields_for_save(
+            conn, peer, msg_data["message_id"], msg_data, preserve_link_state
+        )
         conn.execute(
             """
             INSERT OR REPLACE INTO messages
@@ -404,8 +445,8 @@ def save_message(db_path: str, peer: str, msg_data: dict):
                 msg_data.get("media_status"),
                 msg_data.get("from_id"),
                 msg_data.get("reply_to_msg_id"),
-                int(msg_data.get("is_link_resolved", False)),
-                msg_data.get("resolved_from_url"),
+                link_resolved,
+                resolved_from_url,
                 json.dumps(msg_data.get("raw_json", {}), default=str),
                 now,
             ),
@@ -417,11 +458,20 @@ def save_message(db_path: str, peer: str, msg_data: dict):
         )
 
 
-
-def save_message_and_advance(db_path: str, peer: str, msg_data: dict, message_id: int):
+def save_message_and_advance(
+    db_path: str,
+    peer: str,
+    msg_data: dict,
+    message_id: int,
+    *,
+    preserve_link_state: bool = False,
+):
     """Save message and advance the dialog's resume cursor in a single transaction."""
     now = datetime.utcnow().isoformat()
     with get_conn(db_path) as conn:
+        link_resolved, resolved_from_url = _link_fields_for_save(
+            conn, peer, msg_data["message_id"], msg_data, preserve_link_state
+        )
         conn.execute(
             """
             INSERT OR REPLACE INTO messages
@@ -439,8 +489,8 @@ def save_message_and_advance(db_path: str, peer: str, msg_data: dict, message_id
                 msg_data.get("media_status"),
                 msg_data.get("from_id"),
                 msg_data.get("reply_to_msg_id"),
-                int(msg_data.get("is_link_resolved", False)),
-                msg_data.get("resolved_from_url"),
+                link_resolved,
+                resolved_from_url,
                 json.dumps(msg_data.get("raw_json", {}), default=str),
                 now,
             ),
@@ -534,12 +584,25 @@ def set_resolved_media(
         )
 
 
-def set_link_resolved(db_path: str, peer: str, message_id: int, resolved: bool):
+def set_link_resolved(
+    db_path: str,
+    peer: str,
+    message_id: int,
+    resolved: bool,
+    resolved_from_url: str | None = None,
+):
     with get_conn(db_path) as conn:
-        conn.execute(
-            "UPDATE messages SET is_link_resolved = ? WHERE peer = ? AND message_id = ?",
-            (int(resolved), peer, message_id),
-        )
+        if resolved_from_url is None:
+            conn.execute(
+                "UPDATE messages SET is_link_resolved = ? WHERE peer = ? AND message_id = ?",
+                (int(resolved), peer, message_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE messages SET is_link_resolved = ?, resolved_from_url = ? "
+                "WHERE peer = ? AND message_id = ?",
+                (int(resolved), resolved_from_url, peer, message_id),
+            )
 
 
 def _needs_media_clause() -> str:
@@ -576,12 +639,15 @@ def get_pending_resolved_media(db_path: str, dialog_peer: str) -> list:
 
 
 def get_unresolved_links(db_path: str, peer: str) -> list:
-    """One dialog's rows flagged unresolved that mention a t.me link."""
+    """One dialog's rows flagged unresolved that mention a Telegram message link."""
     with get_conn(db_path) as conn:
         return conn.execute(
             "SELECT message_id, text FROM messages "
-            "WHERE peer = ? AND is_link_resolved = 0 AND text LIKE '%t.me/%' "
-            "ORDER BY message_id",
+            "WHERE peer = ? AND COALESCE(is_link_resolved, 0) = 0 AND ("
+            "lower(text) LIKE '%t.me/%' OR "
+            "lower(text) LIKE '%telegram.me/%' OR "
+            "lower(text) LIKE '%telegram.dog/%'"
+            ") ORDER BY message_id",
             (peer,),
         ).fetchall()
 
@@ -623,7 +689,11 @@ def get_stats(db_path: str, peer: str) -> dict:
         ).fetchone()[0]
         unresolved_links = conn.execute(
             "SELECT COUNT(*) FROM messages "
-            "WHERE peer = ? AND is_link_resolved = 0 AND text LIKE '%t.me/%'",
+            "WHERE peer = ? AND COALESCE(is_link_resolved, 0) = 0 AND ("
+            "lower(text) LIKE '%t.me/%' OR "
+            "lower(text) LIKE '%telegram.me/%' OR "
+            "lower(text) LIKE '%telegram.dog/%'"
+            ")",
             (peer,),
         ).fetchone()[0]
     return {

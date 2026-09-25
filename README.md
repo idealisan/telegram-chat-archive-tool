@@ -9,7 +9,7 @@ database and media directory.
 - Interactive dialog picker: live keyword search, `↑`/`↓` to move, `Enter` to confirm, `Esc` to cancel (prompt_toolkit)
 - Saves all messages (text, media metadata) of the selected dialog to SQLite
 - Downloads media files (photos, videos, documents, audio, voice, stickers, animations)
-- Resolves `t.me/…` links — fetches and saves the *linked* message content
+- Resolves Telegram message links (`t.me`, `telegram.me`, `telegram.dog`) — fetches and saves the *linked* message content; tracking is controlled by `RESOLVE_TME_LINKS` and follows one hop
 - Expands linked album/grouped messages so every photo/video in the group is saved
 - Reuses already-downloaded media when the same Telegram file appears again in forwards, repeats, or full scans
 - Starts from the **oldest** message; fully resumable if interrupted (resume cursor is stored per dialog)
@@ -98,7 +98,7 @@ Interrupt at any time with **Ctrl+C** — progress is saved automatically after 
 | `DOWNLOAD_MEDIA` | `true` | Whether to download media files at all |
 | `MEDIA_TYPES` | all types | Comma-separated media types to download |
 | `MAX_FILE_SIZE_MB` | *(empty = no limit)* | Skip media files larger than this |
-| `RESOLVE_TME_LINKS` | `true` | Fetch & save messages pointed to by `t.me` links |
+| `RESOLVE_TME_LINKS` | `true` | Fetch & save messages pointed to by Telegram message links in text/captions (one hop) |
 | `REQUEST_DELAY_SECONDS` | `0.5` | Sleep between API calls (avoid flood limits) |
 | `PROXY` | *(empty = none)* | SOCKS5/HTTP proxy URL, e.g. `socks5://127.0.0.1:1080` (`python-socks[asyncio]` must be installed) |
 | `SEARCH_PATHS` | *(empty)* | Comma-separated extra directories to search before re-downloading existing media |

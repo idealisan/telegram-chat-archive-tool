@@ -6,14 +6,28 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 TME_PATTERNS = [
-    # https://t.me/username/123
-    re.compile(r"https?://t\.me/(?P<username>[A-Za-z0-9_]{3,})/(?P<msg_id>\d+)"),
-    # https://t.me/c/1234567890/123  (private channels)
-    re.compile(r"https?://t\.me/c/(?P<channel_id>\d+)/(?P<msg_id>\d+)"),
+    re.compile(
+        r"(?<![A-Za-z0-9_/?=&.\-@:])"
+        r"(?P<url>(?:https?://)?(?:www\.)?"
+        r"(?:t\.me|telegram\.me|telegram\.dog)/"
+        r"(?:(?:c/\d+|s/[A-Za-z0-9_]{3,}|[A-Za-z0-9_]{3,})/\d+)/?)"
+        r"(?!\.[A-Za-z0-9]|[-][A-Za-z0-9])"
+        r"(?=$|[^A-Za-z0-9_/])",
+        re.IGNORECASE,
+    )
 ]
+_TME_HOSTS = {
+    "t.me",
+    "www.t.me",
+    "telegram.me",
+    "www.telegram.me",
+    "telegram.dog",
+    "www.telegram.dog",
+}
 
 
 def _parse_bool(value: str | None, default: bool) -> bool:
@@ -160,19 +174,59 @@ def wait_for_disk_space(path: str, min_gb: float, poll_seconds: int = 60) -> Non
         time.sleep(poll_seconds)
 
 
+def _parse_tme_link(url: str) -> dict | None:
+    value = url.strip()
+    if not re.match(r"^https?://", value, re.IGNORECASE):
+        value = "https://" + value
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+
+    host = (parsed.hostname or "").lower()
+    if host not in _TME_HOSTS:
+        return None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) == 3 and parts[0].lower() == "c":
+        channel_id, msg_id = parts[1], parts[2]
+        if not channel_id.isdigit() or not msg_id.isdigit() or int(channel_id) <= 0:
+            return None
+        peer = int("-100" + channel_id)
+    elif len(parts) == 3 and parts[0].lower() == "s":
+        username, msg_id = parts[1], parts[2]
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,}", username) or not msg_id.isdigit():
+            return None
+        peer = username.casefold()
+    elif len(parts) == 2:
+        username, msg_id = parts
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,}", username) or not msg_id.isdigit():
+            return None
+        peer = username.casefold()
+    else:
+        return None
+
+    message_id = int(msg_id)
+    if message_id <= 0:
+        return None
+    return {"url": url, "msg_id": message_id, "peer": peer}
+
+
 def extract_tme_links(text: str) -> list[dict]:
-    """Return a list of parsed t.me link dicts found in *text*."""
+    """Return a list of unique Telegram message links found in *text*."""
     if not text:
         return []
     results = []
+    seen = set()
     for pat in TME_PATTERNS:
-        for m in pat.finditer(text):
-            info = {"url": m.group(0), "msg_id": int(m.group("msg_id"))}
-            if "username" in m.groupdict() and m.group("username"):
-                info["peer"] = m.group("username")
-            else:
-                # Private channel: peer id needs -100 prefix for Telethon
-                info["peer"] = int("-100" + m.group("channel_id"))
+        for match in pat.finditer(text):
+            info = _parse_tme_link(match.group("url"))
+            if info is None:
+                continue
+            key = (str(info["peer"]).casefold(), info["msg_id"])
+            if key in seen:
+                continue
+            seen.add(key)
             results.append(info)
     return results
 

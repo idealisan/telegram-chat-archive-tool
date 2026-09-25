@@ -292,6 +292,11 @@ def _message_to_dict(message) -> dict:
     }
 
 
+def _extract_message_links(message) -> list[dict]:
+    text = getattr(message, "text", None) or getattr(message, "message", None) or ""
+    return utils.extract_tme_links(text)
+
+
 def _get_media_fingerprint(message) -> str | None:
     if getattr(message, "photo", None) and getattr(message.photo, "id", None) is not None:
         return f"photo:{message.photo.id}:{getattr(message.photo, 'access_hash', None)}"
@@ -534,12 +539,12 @@ async def _download_media(
             return str(candidate)
 
     for search_dir in cfg.get("search_paths", []):
-        for candidate in Path(search_dir).rglob(f"{message.id}_*{ext}"):
-            if candidate.is_file():
-                if known_size is None or candidate.stat().st_size == known_size:
-                    print(f"    [FOUND] Located in search path: {candidate}")
-                    return _store_path(candidate), None
-        # Also try exact filename match without name hint
+        if subfolder is None:
+            for candidate in Path(search_dir).rglob(f"{message.id}_*{ext}"):
+                if candidate.is_file():
+                    if known_size is None or candidate.stat().st_size == known_size:
+                        print(f"    [FOUND] Located in search path: {candidate}")
+                        return _store_path(candidate), None
         ns_base = Path(search_dir) / namespace if namespace else Path(search_dir)
         candidate = ns_base / (subfolder or media_type) / date_str / filename
         if candidate.is_file():
@@ -617,6 +622,9 @@ async def resolve_and_save(
     that is definitively gone (deleted / no access) returns True: retrying
     would never succeed.
     """
+    if not cfg.get("resolve_tme_links", True):
+        return False
+
     db_path = cfg["db_path"]
     media_dir = cfg["media_dir"]
     peer = link_info["peer"]
@@ -644,15 +652,31 @@ async def resolve_and_save(
             data["media_type"] = media_type
 
             if cfg.get("download_media") and media_type and media_type != "webpage":
-                existing_path = _get_existing_media_path(
+                existing_path = db.get_resolved_media_path(
                     db_path,
-                    media_dir,
-                    cfg,
-                    linked_member,
                     target.key,
-                    skip_missing=cfg.get("skip_missing_media", False),
-                    allow_same_id=False,
+                    source_message_id,
+                    str(peer),
+                    linked_member.id,
                 )
+                if existing_path and not cfg.get("skip_missing_media", False):
+                    resolved_existing = db.resolve_media_path(
+                        media_dir,
+                        existing_path,
+                        cfg.get("search_paths", []),
+                    )
+                    if not resolved_existing:
+                        existing_path = None
+                if not existing_path:
+                    existing_path = _get_existing_media_path(
+                        db_path,
+                        media_dir,
+                        cfg,
+                        linked_member,
+                        target.key,
+                        skip_missing=cfg.get("skip_missing_media", False),
+                        allow_same_id=False,
+                    )
                 if existing_path:
                     data["media_path"] = existing_path
                     data["media_status"] = None
@@ -779,7 +803,11 @@ async def repair_incomplete(client, target, cfg: dict) -> dict:
             await asyncio.sleep(delay)
 
         # --- 2. Failed linked-message media ---
-        pending_res = db.get_pending_resolved_media(db_path, target.key)
+        pending_res = (
+            db.get_pending_resolved_media(db_path, target.key)
+            if cfg.get("resolve_tme_links", True)
+            else []
+        )
         if pending_res:
             print(f"[REPAIR] Retrying {len(pending_res)} incomplete linked media download(s) …")
         for row in pending_res:
@@ -817,7 +845,7 @@ async def repair_incomplete(client, target, cfg: dict) -> dict:
             await asyncio.sleep(delay)
 
     # --- 3. Previously unresolved t.me links ---
-    if cfg.get("resolve_tme_links"):
+    if cfg.get("resolve_tme_links", True):
         pending_links = db.get_unresolved_links(db_path, target.key)
         if pending_links:
             print(f"[REPAIR] Re-resolving {len(pending_links)} unresolved link message(s) …")
@@ -829,10 +857,19 @@ async def repair_incomplete(client, target, cfg: dict) -> dict:
                     db.set_link_resolved(db_path, target.key, row["message_id"], True)
                     continue
                 ok = True
+                resolved_from_url = None
                 for info in links:
                     ok = await resolve_and_save(client, target, row["message_id"], info, cfg) and ok
+                    if resolved_from_url is None:
+                        resolved_from_url = info["url"]
                     await asyncio.sleep(delay)
-                db.set_link_resolved(db_path, target.key, row["message_id"], ok)
+                db.set_link_resolved(
+                    db_path,
+                    target.key,
+                    row["message_id"],
+                    ok,
+                    resolved_from_url,
+                )
                 if ok:
                     counts["links_repaired"] += 1
                 else:
@@ -865,6 +902,7 @@ async def run_download(cfg: dict, target, *, full_scan: bool = False):
     delay = cfg["request_delay_seconds"]
     min_gb = cfg["min_free_space_gb"]
     search_paths = cfg.get("search_paths", [])
+    link_tracking = cfg.get("resolve_tme_links", True)
     cursor = db.cursor_key(target.key)
 
     db.init_db(db_path)
@@ -880,7 +918,13 @@ async def run_download(cfg: dict, target, *, full_scan: bool = False):
     print(f"[INFO] Target dialog: {target.label} [{target.key}]")
 
     # --- Check for files moved/deleted off disk ---
-    missing_count = db.get_missing_media_count(db_path, media_dir, search_paths, peer=target.key)
+    missing_count = db.get_missing_media_count(
+        db_path,
+        media_dir,
+        search_paths,
+        peer=target.key,
+        include_resolved=link_tracking,
+    )
     skip_missing = cfg.get("skip_missing_media", False)
     if missing_count and not skip_missing:
         print(
@@ -1016,25 +1060,34 @@ async def run_download(cfg: dict, target, *, full_scan: bool = False):
                         else:
                             data["media_status"] = None
 
-                    # --- Resolve t.me links ---
-                    text = data.get("text") or ""
-                    tme_links = utils.extract_tme_links(text) if cfg.get("resolve_tme_links") else []
-
+                    tme_links = _extract_message_links(message) if link_tracking else []
                     if tme_links:
+                        data["resolved_from_url"] = tme_links[0]["url"]
                         links_ok = True
                         for link_info in tme_links:
-                            ok = await resolve_and_save(client, target, message.id, link_info, cfg)
+                            ok = await resolve_and_save(
+                                client, target, message.id, link_info, cfg
+                            )
                             links_ok = links_ok and ok
                             await asyncio.sleep(delay)
-                        # Only mark resolved when every link actually succeeded;
-                        # failures stay 0 so the repair pass retries them next run.
                         data["is_link_resolved"] = links_ok
 
                     if full_scan:
-                        db.save_message(db_path, target.key, data)
+                        db.save_message(
+                            db_path,
+                            target.key,
+                            data,
+                            preserve_link_state=not link_tracking,
+                        )
                         session_resume_id = message.id
                     else:
-                        db.save_message_and_advance(db_path, target.key, data, message.id)
+                        db.save_message_and_advance(
+                            db_path,
+                            target.key,
+                            data,
+                            message.id,
+                            preserve_link_state=not link_tracking,
+                        )
                     total += 1
                     reconnect_attempt = 0  # reset backoff on any success
                     await asyncio.sleep(delay)
@@ -1090,16 +1143,27 @@ async def run_download(cfg: dict, target, *, full_scan: bool = False):
                 "Existing resume cursor was left unchanged."
             )
         stats = db.get_stats(db_path, target.key)
-        print(
-            f"\n[DONE] Session summary for '{target.label}' [{target.key}]:\n"
-            f"  Messages in DB   : {stats['total_messages']}\n"
-            f"  With media       : {stats['with_media']}\n"
-            f"  Links resolved   : {stats['link_resolved']}\n"
-            f"  Linked messages  : {stats['resolved_linked_messages']}\n"
-            f"  This run saved   : {total}\n"
-            f"  Repaired media   : {repair_counts['media_repaired']}\n"
-            f"  Repaired links   : {repair_counts['links_repaired']}\n"
-            f"  Still failing    : {stats['pending_media']} media, "
-            f"{stats['unresolved_links']} links"
-        )
+        if link_tracking:
+            print(
+                f"\n[DONE] Session summary for '{target.label}' [{target.key}]:\n"
+                f"  Messages in DB   : {stats['total_messages']}\n"
+                f"  With media       : {stats['with_media']}\n"
+                f"  Links resolved   : {stats['link_resolved']}\n"
+                f"  Linked messages  : {stats['resolved_linked_messages']}\n"
+                f"  This run saved   : {total}\n"
+                f"  Repaired media   : {repair_counts['media_repaired']}\n"
+                f"  Repaired links   : {repair_counts['links_repaired']}\n"
+                f"  Still failing    : {stats['pending_media']} media, "
+                f"{stats['unresolved_links']} links"
+            )
+        else:
+            print(
+                f"\n[DONE] Session summary for '{target.label}' [{target.key}]:\n"
+                f"  Messages in DB   : {stats['total_messages']}\n"
+                f"  With media       : {stats['with_media']}\n"
+                f"  Linked messages  : {stats['resolved_linked_messages']}\n"
+                f"  This run saved   : {total}\n"
+                f"  Repaired media   : {repair_counts['media_repaired']}\n"
+                f"  Link tracking    : disabled"
+            )
         await client.disconnect()
